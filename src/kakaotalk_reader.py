@@ -16,8 +16,10 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timezone, timedelta
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, TimeoutError as PoolTimeoutError, cpu_count
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -134,6 +136,35 @@ def extract_user_id_from_plist() -> int | None:
 
 # ─── Parallel brute-force ────────────────────────────────────────────────────
 
+def extract_account_hashes_from_plist() -> set[bytes]:
+    """Read SHA-512 account markers used by newer KakaoTalk preferences."""
+    import glob
+    hashes = set()
+    prefixes = ("DESIGNATEDFRIENDSREVISION:", "DENYFILEEXTIONSIONREVISION:")
+    for path in [KAKAO_PLIST_PATH] + glob.glob(KAKAO_PLIST2_GLOB):
+        try:
+            with open(path, "rb") as f:
+                plist = plistlib.load(f)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        for name in plist:
+            if isinstance(name, str) and name.startswith(prefixes):
+                suffix = name.split(":", 1)[1]
+                if re.fullmatch(r"[0-9a-fA-F]{128}", suffix):
+                    hashes.add(bytes.fromhex(suffix))
+    hashes.difference_update(hashlib.sha512(value).digest() for value in (b"", b"0", b"-1"))
+    return hashes
+
+
+def _check_hash_range(args):
+    start, end, uuid, target, hashes = args
+    for uid in range(start, end):
+        if hashlib.sha512(str(uid).encode("ascii")).digest() in hashes:
+            if get_database_name(uid, uuid) == target:
+                return uid
+    return None
+
+
 def _check_range(args):
     start, end, uuid, target = args
     for uid in range(start, end):
@@ -142,14 +173,33 @@ def _check_range(args):
     return None
 
 
-def bruteforce_user_id(uuid: str, target: str, max_id: int = 2_000_000) -> int | None:
-    cores = cpu_count() or 4
-    chunk = max(1000, max_id // (cores * 4))
-    ranges = [(s, min(s + chunk, max_id + 1), uuid, target) for s in range(1, max_id + 1, chunk)]
-    print(f"Brute-forcing userId 1..{max_id} ({cores} cores)...", file=sys.stderr)
+def bruteforce_user_id(uuid: str, target: str, max_id: int | None = None,
+                      timeout: float = 60) -> int | None:
+    hashes = extract_account_hashes_from_plist()
+    if max_id is None:
+        max_id = 6_000_000_000 if hashes else 2_000_000
+    if max_id < 1 or timeout <= 0:
+        raise ValueError("max_id and timeout must be positive")
+    cores = min(cpu_count() or 4, 4)
+    chunk = 250_000 if hashes else max(1000, max_id // (cores * 4))
+    ranges = [(s, min(s + chunk, max_id + 1), uuid, target) + ((hashes,) if hashes else ())
+              for s in range(1, max_id + 1, chunk)]
+    checker = _check_hash_range if hashes else _check_range
+    method = "account SHA-512" if hashes else "database filename"
+    print(f"Searching userId 1..{max_id} via {method} ({cores} cores, {timeout:g}s limit)...",
+          file=sys.stderr)
 
     with Pool(cores) as pool:
-        for i, result in enumerate(pool.imap_unordered(_check_range, ranges)):
+        deadline = time.monotonic() + timeout
+        results = pool.imap_unordered(checker, ranges)
+        for i in range(len(ranges)):
+            try:
+                result = results.next(timeout=max(0, deadline - time.monotonic()))
+            except PoolTimeoutError:
+                pool.terminate()
+                print("userId search timed out; retry setup with a larger --timeout or --user-id.",
+                      file=sys.stderr)
+                return None
             if result is not None:
                 pool.terminate()
                 print(f"  Found userId: {result}", file=sys.stderr)
@@ -161,7 +211,30 @@ def bruteforce_user_id(uuid: str, target: str, max_id: int = 2_000_000) -> int |
 
 # ─── SQLCipher ───────────────────────────────────────────────────────────────
 
+def validate_read_sql(sql: str):
+    if not isinstance(sql, str) or len(sql) > 1_000_000:
+        raise ValueError("SQL must be a string of at most 1 MB")
+    # Ignore quoted values/identifiers and comments while checking SQL syntax.
+    stripped = re.sub(r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]", " ", sql)
+    if re.search(r"(?m)^\s*\.", stripped):
+        raise ValueError("SQLite shell commands are not supported")
+    if ";" in stripped.strip().rstrip(";"):
+        raise ValueError("Use one read-only SQL statement per call")
+    if not re.match(r"\s*(SELECT|WITH|EXPLAIN|PRAGMA)\b", stripped, re.I):
+        raise ValueError("Only read-only SELECT, WITH, EXPLAIN, and inspection PRAGMA queries are supported")
+    if re.search(r"\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|DETACH|VACUUM|REINDEX|ANALYZE|load_extension|writefile|readfile)\b", stripped, re.I):
+        raise ValueError("Only read-only SQL without filesystem or extension functions is supported")
+    pragma = re.match(r"\s*PRAGMA\s+(\w+)", stripped, re.I)
+    if pragma and pragma[1].lower() not in {
+        "table_info", "table_xinfo", "index_list", "index_info", "index_xinfo", "foreign_key_list",
+        "compile_options", "database_list", "function_list", "collation_list", "module_list",
+        "integrity_check", "quick_check", "cipher_integrity_check",
+    }:
+        raise ValueError("This PRAGMA is not a read-only inspection query")
+
+
 def sqlcipher_query(db_path: str, key: str, sql: str, json_mode: bool = True) -> str:
+    validate_read_sql(sql)
     if not os.path.exists(SQLCIPHER_BIN):
         print(f"Error: sqlcipher not found. Install: brew install sqlcipher", file=sys.stderr)
         sys.exit(1)
@@ -172,7 +245,7 @@ def sqlcipher_query(db_path: str, key: str, sql: str, json_mode: bool = True) ->
         ".mode json" if json_mode else ".mode column\n.headers on",
         sql,
     ]
-    r = subprocess.run([SQLCIPHER_BIN, db_path], input="\n".join(cmds) + "\n",
+    r = subprocess.run([SQLCIPHER_BIN, "-noinit", "-batch", "-bail", "-safe", "-readonly", db_path], input="\n".join(cmds) + "\n",
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         err = r.stderr.strip()
@@ -185,6 +258,10 @@ def sqlcipher_query(db_path: str, key: str, sql: str, json_mode: bool = True) ->
 
 def query_json(db_path: str, key: str, sql: str) -> list[dict]:
     raw = sqlcipher_query(db_path, key, sql)
+    lines = raw.splitlines()
+    while lines and lines[0].strip() in ("", "ok"):
+        lines.pop(0)
+    raw = "\n".join(lines).strip()
     if not raw:
         return []
     if raw.startswith(("Error", "Parse error", "Runtime error")):
@@ -208,9 +285,18 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
+    directory = os.path.dirname(CONFIG_PATH)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as f:
+            temporary = f.name
+            os.fchmod(f.fileno(), 0o600)
+            json.dump(cfg, f, indent=2)
+        os.replace(temporary, CONFIG_PATH)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def resolve(args) -> tuple[str, str]:
@@ -248,7 +334,9 @@ def resolve(args) -> tuple[str, str]:
                 print("Error: userId not found.", file=sys.stderr)
                 sys.exit(1)
 
-    save_config({"uuid": uuid, "user_id": user_id, "db_path": db_path})
+    updated = {**cfg, "uuid": uuid, "user_id": user_id, "db_path": db_path}
+    if cfg != updated:
+        save_config(updated)
     return db_path, get_secure_key(user_id, uuid)
 
 
@@ -312,7 +400,7 @@ def cmd_setup(args):
         else:
             user_id = None
     if not user_id:
-        user_id = bruteforce_user_id(uuid, target, args.max_id)
+        user_id = bruteforce_user_id(uuid, target, args.max_id, args.timeout)
         if not user_id:
             print("Error: userId not found.", file=sys.stderr); sys.exit(1)
 
@@ -357,106 +445,33 @@ def cmd_schema(args):
 
 
 def _resolve_room_name(p: str, k: str, row: dict) -> str:
-    """Resolve a display name for a chat room."""
-    # 1) chatName if set
-    if row.get("chatName"):
-        return row["chatName"]
-
-    # 2) For 1:1 or bot chats, use directChatMemberUserId
-    direct_uid = row.get("directChatMemberUserId", 0)
-    lid = row.get("linkId", 0)
-    if direct_uid:
-        try:
-            users = query_json(p, k,
-                f"SELECT nickName FROM NTUser WHERE userId = {direct_uid} AND linkId = {lid} LIMIT 1;")
-            if users and users[0].get("nickName"):
-                return users[0]["nickName"]
-        except Exception:
-            pass
-
-    # 3) Fallback: gather member names from messages
-    cid = row["chatId"]
-    try:
-        members = query_json(p, k,
-            f"SELECT u.nickName FROM ("
-            f"  SELECT DISTINCT authorId FROM NTChatMessage WHERE chatId = {cid} LIMIT 20"
-            f") a JOIN NTUser u ON a.authorId = u.userId AND u.linkId = {lid}"
-            f" LIMIT 10;")
-        names = [m["nickName"] for m in members if m.get("nickName")]
-        if names:
-            return ", ".join(names[:4])
-    except Exception:
-        pass
-
-    return "(unnamed)"
+    from kakaotalk_service import Reader
+    return Reader(p, k).find_room(int(row["chatId"]))["displayName"]
 
 
 def cmd_rooms(args):
-    p, k = resolve(args)
-    rows = query_json(p, k,
-        "SELECT chatId, type, chatName, linkId, lastLogId, directChatMemberUserId, activeMembersCount "
-        "FROM NTChatRoom ORDER BY lastLogId DESC LIMIT 50;")
-
-    for row in rows:
-        row["displayName"] = _resolve_room_name(p, k, row)
-
+    page = _reader_for(args).rooms(args.limit, args.offset, args.query, args.room_type, args.unread_only)
     if args.format == "json":
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        print(json.dumps(page, ensure_ascii=False, indent=2))
     else:
-        type_map = {0: "1:1", 1: "Group", 2: "Group", 3: "Open", 4: "Open"}
-        for r in rows:
-            t = type_map.get(r.get("type", -1), str(r.get("type", "?")))
-            name = r["displayName"]
-            cid = r["chatId"]
-            cnt = r.get("activeMembersCount", 0)
-            suffix = f" ({cnt}명)" if cnt > 2 else ""
-            print(f"  [{t:5s}] {cid} | {name}{suffix}")
+        for room in page["items"]:
+            print(f"[{room['roomType']}] {room['chatId']} | {room['displayName']} ({room['activeMembersCount']}명, 안 읽음 {room['countOfNewMessage']})")
+        print(f"{len(page['items'])}/{page['total']} rooms; next offset: {page['nextOffset']}")
 
 
 def cmd_read(args):
-    p, k = resolve(args)
-    limit = args.limit
-
-    where = f'WHERE m.chatId = {args.room_id}' if args.room_id else ''
-    sql = f"""
-        SELECT m.chatId, m.logId, m.authorId, m.type, m.sentAt, m.message,
-               m.attachment, u.nickName
-        FROM NTChatMessage m
-        LEFT JOIN NTChatRoom r ON m.chatId = r.chatId
-        LEFT JOIN NTUser u ON m.authorId = u.userId AND u.linkId = COALESCE(r.linkId, 0)
-        {where}
-        ORDER BY m.logId DESC LIMIT {limit};
-    """
-    rows = query_json(p, k, sql)
-    rows.reverse()
-
-    if args.format == "json":
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-    else:
-        print(f"Messages: {len(rows)}\n")
-        _print_msgs(rows)
+    page = _reader_for(args).messages(room_id=args.room_id or 0, room_name=args.room_name, limit=args.limit,
+                             offset=args.offset, since=args.since, until=args.until,
+                             before_log_id=args.before_log_id, after_log_id=args.after_log_id)
+    _print_page(args, page)
 
 
 def cmd_search(args):
-    p, k = resolve(args)
-    kw = args.keyword.replace("'", "''")
-    sql = f"""
-        SELECT m.chatId, m.logId, m.authorId, m.type, m.sentAt, m.message,
-               u.nickName
-        FROM NTChatMessage m
-        LEFT JOIN NTChatRoom r ON m.chatId = r.chatId
-        LEFT JOIN NTUser u ON m.authorId = u.userId AND u.linkId = COALESCE(r.linkId, 0)
-        WHERE m.message LIKE '%{kw}%'
-        ORDER BY m.logId DESC LIMIT {args.limit};
-    """
-    rows = query_json(p, k, sql)
-    rows.reverse()
-
-    if args.format == "json":
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-    else:
-        print(f"Search '{args.keyword}': {len(rows)} results\n")
-        _print_msgs(rows, show_room=True)
+    if not args.keyword:
+        raise ValueError("keyword must not be empty")
+    page = _reader_for(args).messages(keyword=args.keyword, room_id=args.room_id, room_name=args.room_name,
+                             limit=args.limit, offset=args.offset, since=args.since, until=args.until)
+    _print_page(args, page)
 
 
 def _parse_date(s: str) -> datetime | None:
@@ -485,60 +500,14 @@ def _parse_date(s: str) -> datetime | None:
 
 
 def cmd_recent(args):
-    p, k = resolve(args)
-
-    since_dt = _parse_date(getattr(args, "since", None))
-    until_dt = _parse_date(getattr(args, "until", None))
-
-    conditions = []
-    if since_dt:
-        conditions.append(f"m.sentAt >= {int(since_dt.timestamp())}")
-    if until_dt:
-        # until is exclusive end-of-day
-        until_end = until_dt + timedelta(days=1)
-        conditions.append(f"m.sentAt < {int(until_end.timestamp())}")
-
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    limit_clause = f"LIMIT {args.limit}" if not (since_dt or until_dt) else f"LIMIT {args.limit}"
-
-    sql = f"""
-        SELECT m.chatId, m.logId, m.authorId, m.type, m.sentAt, m.message,
-               u.nickName
-        FROM NTChatMessage m
-        LEFT JOIN NTChatRoom r ON m.chatId = r.chatId
-        LEFT JOIN NTUser u ON m.authorId = u.userId AND u.linkId = COALESCE(r.linkId, 0)
-        {where}
-        ORDER BY m.logId DESC LIMIT {args.limit};
-    """
-    rows = query_json(p, k, sql)
-    rows.reverse()
-
-    if args.format == "json":
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-    else:
-        label = f"Recent {len(rows)} messages"
-        if since_dt:
-            label += f" since {since_dt.strftime('%Y-%m-%d')}"
-        if until_dt:
-            label += f" until {until_dt.strftime('%Y-%m-%d')}"
-        print(f"{label}\n")
-        _print_msgs(rows, show_room=True)
+    page = _reader_for(args).messages(limit=args.limit, offset=args.offset, since=args.since, until=args.until,
+                             before_log_id=args.before_log_id, after_log_id=args.after_log_id)
+    _print_page(args, page)
 
 
 def cmd_users(args):
-    p, k = resolve(args)
-    sql = f"SELECT * FROM NTUser LIMIT {args.limit};"
-    rows = query_json(p, k, sql)
-
-    if args.format == "json":
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-    else:
-        print(f"Users: {len(rows)}\n")
-        for r in rows:
-            uid = r.get("userId", "?")
-            nick = r.get("nickName", "")
-            did = r.get("directChatId", "")
-            print(f"  {uid} | {nick}" + (f" | chat:{did}" if did else ""))
+    page = _reader_for(args).users(args.query, args.limit, args.offset)
+    print(json.dumps(page, ensure_ascii=False, indent=2))
 
 
 def cmd_sql(args):
@@ -581,11 +550,11 @@ def cmd_find_userid(args):
         print(f"Found from plist! userId = {plist_uid}")
         return
 
-    uid = bruteforce_user_id(uuid, target, args.max_id)
+    uid = bruteforce_user_id(uuid, target, args.max_id, args.timeout)
     if uid:
         print(json.dumps({"user_id": uid}) if args.format == "json" else f"Found! userId = {uid}")
     else:
-        print(f"Not found in 1..{args.max_id}", file=sys.stderr); sys.exit(1)
+        print("userId not found within the search limits.", file=sys.stderr); sys.exit(1)
 
 
 def cmd_export(args):
@@ -632,8 +601,8 @@ MSG_TYPES = {
     5: "[contact]", 6: "[file]", 12: "[sticker]",
     14: "[map]", 16: "[schedule]", 18: "[voip]",
     22: "[emoji]", 23: "[shout]", 24: "[reply]",
-    26: "[gift]", 27: "[system]", 51: "[liveview]",
-    71: "[voicetalk]", 72: "[grouptalk]",
+    26: "[reply]", 27: "[album]", 51: "[media]",
+    71: "[card]", 72: "[notification card]",
 }
 
 
@@ -641,11 +610,11 @@ def _print_msgs(rows: list[dict], show_room: bool = False):
     for m in rows:
         ts = fmt_ts(m.get("sentAt"))
         nick = m.get("nickName") or str(m.get("authorId", "?"))
-        text = m.get("message") or ""
+        text = m.get("text") or m.get("message") or ""
         mtype = int(m.get("type", 1))
         tag = MSG_TYPES.get(mtype, f"[type:{mtype}]") if mtype != 1 else ""
 
-        room = f"[{m['chatId']}] " if show_room and "chatId" in m else ""
+        room = f"[{m.get('roomName') or m['chatId']}] " if show_room and "chatId" in m else ""
 
         # For non-text types, try to show attachment info
         if not text and tag and m.get("attachment"):
@@ -661,84 +630,142 @@ def _print_msgs(rows: list[dict], show_room: bool = False):
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
+def _reader_for(args):
+    from kakaotalk_service import Reader
+    path, key = resolve(args)
+    return Reader(path, key, getattr(args, "user_id", None) or load_config().get("user_id"))
+
+
+def _print_page(args, page):
+    if args.format == "json":
+        print(json.dumps(page, ensure_ascii=False, indent=2))
+    else:
+        print(f"Messages: {len(page['items'])}/{page['total']}; next offset: {page['nextOffset']}\n")
+        _print_msgs(page["items"], show_room=True)
+
+
+def cmd_extra(args):
+    from kakaotalk_service import media_entries, visible_media
+    if args.command == "ui":
+        from kakaotalk_ui import snapshot
+        result = snapshot(args.window, status_only=args.status)
+    else:
+        reader = _reader_for(args)
+        if args.command == "status":
+            result = reader.status()
+        elif args.command == "room":
+            result = reader.room(args.room_id, args.room_name)
+        elif args.command == "message":
+            result = reader.message(args.room_id, args.log_id)
+        elif args.command == "activity":
+            result = reader.activity(args.since, args.until)
+        elif args.command == "notices":
+            result = reader.notices(args.room_id, args.limit, args.offset)
+        elif args.command == "bookmarks":
+            result = reader.bookmarks(args.room_id, args.limit, args.offset)
+        elif args.command == "folders":
+            result = reader.folders()
+        elif args.command == "events":
+            result = reader.events(args.since, args.until, args.room_id, args.limit, args.offset)
+        elif args.command == "media":
+            if args.download:
+                from kakaotalk_media import retrieve
+                result, _ = retrieve(reader, args.room_id, args.log_id, args.index)
+            else:
+                result = {"items": visible_media(media_entries(reader.raw_message(args.room_id, args.log_id)))}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        prog="kakaotalk-reader",
-        description="Read KakaoTalk Mac's encrypted local database.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s info                     Show config & DB files
-  %(prog)s setup                    Auto-detect userId & verify
-  %(prog)s rooms                    List chat rooms
-  %(prog)s read <room_id> -n 100    Read messages from a room
-  %(prog)s search "keyword" -n 20   Search messages
-  %(prog)s recent -n 50             Recent 50 messages
-  %(prog)s recent --since today     Today's messages
-  %(prog)s recent --since yesterday --until yesterday
-                                    Yesterday only
-  %(prog)s recent --since 2026-03-01 --until 2026-03-07
-                                    Date range
-  %(prog)s recent --since="-3d"     Last 3 days
-  %(prog)s users                    List users/contacts
-  %(prog)s sql "SELECT ..."         Raw SQL query
-  %(prog)s --format json recent     JSON output for piping
-
-Requires: brew install sqlcipher
-""",
-    )
-    parser.add_argument("--uuid", help="Hardware UUID (auto-detected)")
-    parser.add_argument("--user-id", type=int, help="KakaoTalk userId (auto-detected from plist)")
-    parser.add_argument("--db-path", help="DB file path (auto-detected)")
+    parser = argparse.ArgumentParser(prog="kakaotalk-reader", description="Read KakaoTalk local data and app surfaces without sending messages.")
+    parser.add_argument("--uuid", help="Hardware UUID override")
+    parser.add_argument("--user-id", type=int, help="KakaoTalk numeric user ID override")
+    parser.add_argument("--db-path", help="Local database override")
     parser.add_argument("--format", choices=["text", "json"], default="text")
-
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("info", help="Show config and DB files")
+    def paging(p, limit=100):
+        p.add_argument("-n", "--limit", type=int, default=limit)
+        p.add_argument("--offset", type=int, default=0)
 
-    p = sub.add_parser("setup", help="Auto-detect and verify setup")
-    p.add_argument("--max-id", type=int, default=2_000_000)
+    def dates(p, since="", until=""):
+        p.add_argument("--since", default=since)
+        p.add_argument("--until", default=until)
 
-    p = sub.add_parser("find-userid", help="Find userId")
-    p.add_argument("--max-id", type=int, default=2_000_000)
+    def room_filter(p):
+        p.add_argument("--room-id", type=int, default=0)
+        p.add_argument("--room-name", default="")
 
-    sub.add_parser("tables", help="List DB tables")
+    def cursors(p):
+        p.add_argument("--before-log-id", type=int, default=0)
+        p.add_argument("--after-log-id", type=int, default=0)
 
-    p = sub.add_parser("schema", help="Show table schema")
+    sub.add_parser("info", help="Inspect setup")
+    for name in ("setup", "find-userid"):
+        p = sub.add_parser(name, help="Detect and verify the local account")
+        p.add_argument("--max-id", type=int, help="Search ceiling: 6 billion with account hashes, otherwise 2 million")
+        p.add_argument("--timeout", type=float, default=60)
+    sub.add_parser("tables", help="List database tables")
+    p = sub.add_parser("schema", help="Read table schema")
     p.add_argument("table", nargs="?")
 
-    sub.add_parser("rooms", help="List chat rooms")
-
-    p = sub.add_parser("read", help="Read messages")
+    p = sub.add_parser("rooms", help="List/search rooms with exact names and unread counts")
+    paging(p)
+    p.add_argument("--query", default="")
+    p.add_argument("--room-type", type=int, default=-1)
+    p.add_argument("--unread-only", action="store_true")
+    p = sub.add_parser("read", help="Read messages from a room ID or --room-name")
     p.add_argument("room_id", nargs="?", type=int)
-    p.add_argument("-n", "--limit", type=int, default=50)
-
-    p = sub.add_parser("search", help="Search messages")
+    p.add_argument("--room-name", default="")
+    paging(p, 50); dates(p); cursors(p)
+    p = sub.add_parser("search", help="Search full message/card/reply text")
     p.add_argument("keyword")
-    p.add_argument("-n", "--limit", type=int, default=50)
-
-    p = sub.add_parser("recent", help="Recent messages")
-    p.add_argument("-n", "--limit", type=int, default=30)
-    p.add_argument("--since", help="Start date (e.g. 2026-03-18, today, yesterday)")
-    p.add_argument("--until", help="End date (e.g. 2026-03-19, today)")
-
-    p = sub.add_parser("users", help="List users/contacts")
-    p.add_argument("-n", "--limit", type=int, default=100)
-
-    p = sub.add_parser("sql", help="Run raw SQL")
+    paging(p, 50); dates(p); room_filter(p)
+    p = sub.add_parser("recent", help="Read recent messages across rooms")
+    paging(p, 30); dates(p); cursors(p)
+    p = sub.add_parser("users", help="List/search contact names")
+    paging(p)
+    p.add_argument("--query", default="")
+    p = sub.add_parser("sql", help="Run one read-only inspection query")
     p.add_argument("query")
+
+    sub.add_parser("status", help="Show capabilities and local history coverage")
+    p = sub.add_parser("room", help="Read room details, participants, and notices")
+    room_filter(p)
+    p = sub.add_parser("message", help="Read one complete message")
+    p.add_argument("room_id", type=int)
+    p.add_argument("log_id", type=int)
+    p = sub.add_parser("activity", help="Summarize message activity by room")
+    dates(p, "last7d", "now")
+    for name in ("notices", "bookmarks", "events"):
+        p = sub.add_parser(name, help=f"Read local {name}")
+        p.add_argument("--room-id", type=int, default=0)
+        paging(p)
+        if name == "events": dates(p, "today")
+    sub.add_parser("folders", help="Read chat folders")
+    p = sub.add_parser("media", help="List or explicitly download message media")
+    p.add_argument("room_id", type=int)
+    p.add_argument("log_id", type=int)
+    p.add_argument("--index", type=int, default=0)
+    p.add_argument("--download", action="store_true")
+    p = sub.add_parser("ui", help="Read current KakaoTalk app surface")
+    p.add_argument("--window", default="")
+    p.add_argument("--status", action="store_true")
 
     args = parser.parse_args()
     if not args.command:
-        parser.print_help(); sys.exit(1)
+        parser.print_help()
+        sys.exit(1)
+    commands = {"info": cmd_info, "setup": cmd_setup, "find-userid": cmd_find_userid,
+                "tables": cmd_tables, "schema": cmd_schema, "rooms": cmd_rooms,
+                "read": cmd_read, "search": cmd_search, "recent": cmd_recent,
+                "users": cmd_users, "sql": cmd_sql}
+    try:
+        commands.get(args.command, cmd_extra)(args)
+    except (ValueError, RuntimeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
-    cmds = {
-        "info": cmd_info, "setup": cmd_setup, "find-userid": cmd_find_userid,
-        "tables": cmd_tables, "schema": cmd_schema, "rooms": cmd_rooms,
-        "read": cmd_read, "search": cmd_search, "recent": cmd_recent,
-        "users": cmd_users, "sql": cmd_sql,
-    }
-    cmds[args.command](args)
 
 
 if __name__ == "__main__":

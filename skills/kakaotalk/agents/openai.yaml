@@ -1,0 +1,4 @@
+interface:
+  display_name: "카카오톡"
+  short_description: "PC 앱 로그인을 유지하며 카카오톡 대화 조회와 메시지 전송"
+  default_prompt: "$kakaotalk 스킬로 카카오톡 대화를 확인하고 요청한 작업을 처리해줘."
