@@ -10,7 +10,9 @@ from datetime import timedelta
 from pathlib import Path
 
 
-DEFAULT_ROOT = Path.home() / "Documents/workspace/kakaotalk-reader"
+SOURCE_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_ROOT = (SOURCE_ROOT if (SOURCE_ROOT / "pyproject.toml").is_file() else
+                Path.home() / "Documents/workspace/kakaotalk-ax")
 READ_ONLY_TOOLS = frozenset({"kakaotalk_ax_windows", "kakaotalk_ax_read", "kakaotalk_ax_send_result"})
 SEND_TOOL = "kakaotalk_ax_send"
 SEND_TOOLS = frozenset({SEND_TOOL})
@@ -56,7 +58,7 @@ async def invoke(root, name, arguments, timeout):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    parameters = StdioServerParameters(command=str(root / ".venv/bin/python"), args=["-m", "kakaotalk_mcp"])
+    parameters = StdioServerParameters(command=str(root / ".venv/bin/python"), args=["-m", "kakaotalk_automation", "mcp"])
     async with stdio_client(parameters) as (read, write):
         async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=timeout)) as session:
             await session.initialize()
@@ -73,7 +75,7 @@ async def invoke(root, name, arguments, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path(os.environ.get("KAKAOTALK_READER_ROOT", DEFAULT_ROOT)))
+    parser.add_argument("--root", type=Path, default=Path(os.environ.get("KAKAOTALK_AX_ROOT", DEFAULT_ROOT)))
     parser.add_argument("--timeout", type=int, default=75)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status")

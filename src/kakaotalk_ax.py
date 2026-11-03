@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
+# Preserve the existing journals and shared lock to avoid duplicate dispatches
+# across old/new command names. These directories contain helper state, not app data.
 UI_ROOT = Path.home() / ".config/kakaotalk-reader/ax-ui"
 AX_STATE_ROOT = Path.home() / ".config/kakaotalk-reader/ax-send-operations"
 _mutex = threading.RLock()

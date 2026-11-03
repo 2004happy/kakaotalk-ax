@@ -1,9 +1,9 @@
 ---
-name: kakaotalk
+name: kakaotalk-ax
 description: "카카오톡(카톡)의 방 열기·닫기·본문 읽기·일괄 읽기·검색·이전 대화 요청·메시지 전송을 네이티브 AX 헬퍼로 수행한다."
 ---
 
-# 카카오톡
+# kakaotalk-ax
 
 앱 자동화는 기존 `kakaotalk_automation.NativeAX` 헬퍼와 `kakaotalk_ax_*` 도구를 사용한다.
 모든 읽기·쓰기는 AX만 사용한다. CUA·스크린샷·OCR·좌표 클릭·키 입력·임시 스크립트·DB로 대체하지 않는다.
@@ -15,14 +15,14 @@ description: "카카오톡(카톡)의 방 열기·닫기·본문 읽기·일괄 
 최신 MCP를 호출한다. `SKILL_DIR`는 이 스킬 폴더의 절대 경로로 바꾼다.
 
 ```bash
-python3 SKILL_DIR/scripts/kakaotalk.py status
-python3 SKILL_DIR/scripts/kakaotalk.py tools
-python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_ax_rooms --args-file /absolute/path/arguments.json
-python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_ax_send --args-file /absolute/path/request.json
+python3 SKILL_DIR/scripts/kax.py status
+python3 SKILL_DIR/scripts/kax.py tools
+python3 SKILL_DIR/scripts/kax.py call kakaotalk_ax_rooms --args-file /absolute/path/arguments.json
+python3 SKILL_DIR/scripts/kax.py call kakaotalk_ax_send --args-file /absolute/path/request.json
 ```
 
-클라이언트는 `~/Documents/workspace/kakaotalk-reader/.venv`를 사용한다. 체크아웃이 다르면
-`--root` 또는 `KAKAOTALK_READER_ROOT`를 지정한다. 사용자 텍스트를 셸 코드에 넣지 않고 JSON 파일로 전달한다.
+클라이언트는 `~/Documents/workspace/kakaotalk-ax/.venv`를 사용한다. 체크아웃이 다르면
+`--root` 또는 `KAKAOTALK_AX_ROOT`를 지정한다. 사용자 텍스트를 셸 코드에 넣지 않고 JSON 파일로 전달한다.
 
 ## AX 자동화
 
@@ -45,7 +45,7 @@ python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_ax_send --args-file /absol
   본인 방만 확인할 때는 `require_self=True`를 쓴다. 기존 초안은 지우지 않는다.
   `observed_in_ax`는 새 텍스트와 빈 입력창을 관찰한 결과이며 작성자·서버 ACK·읽음 확인이 아니다.
   타임아웃·`outcome_unknown`에서는 원래 ID로 `kakaotalk_ax_send_result`만 조회하고 새 ID로 재발송하지 않는다.
-- MCP 연결이 없으면 CLI `kakaotalk-automation ax-call METHOD --args-file /absolute/path/arguments.json`을
+- MCP 연결이 없으면 CLI `kax ax-call METHOD --args-file /absolute/path/arguments.json`을
   사용한다. 메서드·도구 대응과 정확한 인수는 [AX API](references/ax-api.md)를 읽는다.
 
 

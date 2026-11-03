@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import kakaotalk_mcp
 
-SCRIPT = Path(__file__).resolve().parents[1] / "skills/kakaotalk/scripts/kakaotalk.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "skills/kakaotalk-ax/scripts/kax.py"
 spec = importlib.util.spec_from_file_location("kakaotalk_skill_client", SCRIPT)
 client = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(client)

@@ -18,6 +18,7 @@ from kakaotalk_ax import AXOperations, integer, ui_session
 from kakaotalk_state import digest
 
 
+# Keep the existing cache location across the project rename.
 BINARY_ROOT = Path.home() / ".cache/kakaotalk-reader/native"
 
 
@@ -150,8 +151,9 @@ def ax_row(row):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(prog="kax", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("mcp", help="Serve the AX tools over MCP stdio")
     command = commands.add_parser("build")
     command.add_argument("--kind", choices=("send", "read", "control"), default="send")
     command = commands.add_parser("ax-call")
@@ -167,6 +169,10 @@ def main():
     command.add_argument("--offset", type=int, default=0)
     command.add_argument("--snapshot-id", default="")
     args = parser.parse_args()
+    if args.command == "mcp":
+        from kakaotalk_mcp import main as serve
+        serve()
+        return 0
     sending_operation = None
     try:
         if args.command == "ax-call":

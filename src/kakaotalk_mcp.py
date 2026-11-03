@@ -6,7 +6,7 @@ import json
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-mcp = FastMCP("kakaotalk", instructions=(
+mcp = FastMCP("kakaotalk-ax", instructions=(
     "카카오톡의 모든 기능은 kakaotalk_ax_* 네이티브 접근성 헬퍼를 사용합니다. "
     "방 열기·닫기·읽기·일괄 조회·검색·이전 대화 요청·전송을 지원합니다. "
     "DB 조회·계정 키 복구·비공식 프로토콜·별도 인증·기기 등록은 제공하지 않습니다. "

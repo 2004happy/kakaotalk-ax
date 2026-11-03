@@ -1,12 +1,18 @@
-# kakaotalk-reader
+# kakaotalk-ax
 
 macOS 카카오톡을 네이티브 Accessibility(AX) API로 읽고 조작하는 CLI·Python 헬퍼·MCP 서버입니다.
 방 열기·닫기, 본문 읽기, 여러 방 병렬 읽기, 검색, 이전 대화 요청, 메시지 전송을 제공합니다.
 
 **v0.8.0부터 모든 기능은 AX만 사용합니다.** 기존 DB 조회·SQLCipher·계정 키 복구·미디어 다운로드와
 DB 기반 전송 확인 코드는 제거했습니다. LOCO·태블릿 클라이언트·별도 인증·기기 등록도 제공하지 않습니다.
-프로젝트 이름과 `kakaotalk-reader` 실행 명령은 유지하며, 이 명령은 AX CLI의 별칭입니다.
+프로젝트·패키지 이름은 `kakaotalk-ax`, 실행 명령은 `kax`입니다.
+MCP 서버도 같은 CLI의 `kax mcp`로 실행합니다.
 기존 카카오톡 데이터나 로그인 정보, 과거 전송 요청 기록은 삭제하지 않습니다.
+
+v0.9.0에서 저장소·패키지·스킬 이름을 `kakaotalk-ax`로 바꿨습니다. 기존 CLI 세 개는 `kax` 하나로 통합했습니다.
+기존 설치를 바꿀 때는 `python -m pip uninstall kakaotalk-reader` 후 새 패키지를 설치하세요.
+전송 중복 방지 기록과 공용 잠금은 이전 `~/.config/kakaotalk-reader/` 경로를 그대로 사용합니다.
+네이티브 캐시도 이전 경로를 유지합니다. Python `NativeAX` API와 MCP의 `kakaotalk_ax_*` 도구 이름은 동일합니다.
 
 ## 설치
 
@@ -17,10 +23,10 @@ macOS 설정에서 실행하는 터미널 또는 에이전트에 손쉬운 사�
 xcode-select --install
 python3 -m venv .venv
 .venv/bin/pip install -e '.[mcp,dev]'
-.venv/bin/kakaotalk-automation build --kind read
-.venv/bin/kakaotalk-automation build --kind control
-.venv/bin/kakaotalk-automation build --kind send
-.venv/bin/kakaotalk-automation status
+.venv/bin/kax build --kind read
+.venv/bin/kax build --kind control
+.venv/bin/kax build --kind send
+.venv/bin/kax status
 ```
 
 `status`는 열린 창의 AX 상태만 읽습니다. 로그인·검색·방 열기·메시지 전송은 하지 않습니다.
@@ -50,7 +56,7 @@ ax.close_room("정확한 방 이름")
 `read_many`는 필요한 창을 순서대로 열고 최대 4개 프로세스로 본문을 병렬 조회합니다.
 `close_after=True`는 해당 호출이 새로 연 창만 닫으며 기존 창과 초안은 보존합니다.
 
-자세한 인수와 도구 대응은 [AX API](skills/kakaotalk/references/ax-api.md)를 참고하세요.
+자세한 인수와 도구 대응은 [AX API](skills/kakaotalk-ax/references/ax-api.md)를 참고하세요.
 
 ## 메시지 전송
 
@@ -80,9 +86,9 @@ result = ax.send_result("request-unique-id")
 ## CLI
 
 ```bash
-.venv/bin/kakaotalk-automation ax-windows
-.venv/bin/kakaotalk-automation ax-read --window-title '정확한 방 이름' --limit 50
-.venv/bin/kakaotalk-automation ax-call read_many --args-file /absolute/path/arguments.json
+.venv/bin/kax ax-windows
+.venv/bin/kax ax-read --window-title '정확한 방 이름' --limit 50
+.venv/bin/kax ax-call read_many --args-file /absolute/path/arguments.json
 ```
 
 `ax-call`은 Python 메서드와 같은 이름과 JSON 인수를 사용합니다. 사용자 텍스트는 셸 코드 대신 JSON 파일로
@@ -96,8 +102,9 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 ```json
 {
   "mcpServers": {
-    "kakaotalk": {
-      "command": "/absolute/path/kakaotalk-reader/.venv/bin/kakaotalk-mcp"
+    "kakaotalk-ax": {
+      "command": "/absolute/path/kakaotalk-ax/.venv/bin/kax",
+      "args": ["mcp"]
     }
   }
 }
@@ -117,16 +124,16 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 총 12개 도구입니다. 이전 DB 도구와 `kakaotalk_send`는 더 이상 등록되지 않습니다.
 업데이트 전에 실행한 MCP 서버는 재연결해야 새 도구 목록을 받습니다.
 
-저장소의 [카카오톡 스킬](skills/kakaotalk/SKILL.md)은 이 AX 헬퍼를 사용합니다.
+저장소의 [카카오톡 스킬](skills/kakaotalk-ax/SKILL.md)은 이 AX 헬퍼를 사용합니다.
 연결된 MCP가 없으면 스킬 클라이언트가 로컬 MCP 서버를 일회성으로 실행합니다.
 
 ```bash
-.venv/bin/python skills/kakaotalk/scripts/kakaotalk.py status
-.venv/bin/python skills/kakaotalk/scripts/kakaotalk.py tools
-.venv/bin/python skills/kakaotalk/scripts/kakaotalk.py call kakaotalk_ax_read --args-file /absolute/path/arguments.json
+.venv/bin/python skills/kakaotalk-ax/scripts/kax.py status
+.venv/bin/python skills/kakaotalk-ax/scripts/kax.py tools
+.venv/bin/python skills/kakaotalk-ax/scripts/kax.py call kakaotalk_ax_read --args-file /absolute/path/arguments.json
 ```
 
-스킬의 `status`도 AX 창 상태만 읽습니다. 별도 체크아웃은 `--root` 또는 `KAKAOTALK_READER_ROOT`로 지정합니다.
+스킬의 `status`도 AX 창 상태만 읽습니다. 별도 체크아웃은 `--root` 또는 `KAKAOTALK_AX_ROOT`로 지정합니다.
 스킬은 저장소에 포함되며 자동으로 개인 스킬 폴더에 설치하지 않습니다.
 
 ## 읽기 범위와 제한

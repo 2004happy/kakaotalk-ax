@@ -20,9 +20,9 @@ Python 진입점은 `from kakaotalk_automation import NativeAX; ax = NativeAX()`
 | `send_message(window_title, text, operation_id, wait_seconds=3, require_self=False)` | `kakaotalk_ax_send` |
 | `send_result(operation_id, wait_seconds=0)` | `kakaotalk_ax_send_result` |
 
-CLI는 `.venv/bin/kakaotalk-automation ax-call METHOD --args-file FILE`이다.
+CLI는 `.venv/bin/kax ax-call METHOD --args-file FILE`이다.
 인수 파일은 Python 메서드와 같은 키의 JSON 객체이며 `windows`/`rooms`는 생략할 수 있다.
-스킬 클라이언트로는 `scripts/kakaotalk.py call MCP_TOOL --args-file FILE`을 사용한다.
+스킬 클라이언트로는 `scripts/kax.py call MCP_TOOL --args-file FILE`을 사용한다.
 
 일괄 조회 예시:
 
