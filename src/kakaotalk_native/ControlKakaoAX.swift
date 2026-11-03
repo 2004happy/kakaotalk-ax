@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-// Native AX navigation only. Never uses coordinates, CGEvent, clipboard, DB, network or login.
+// Native AX navigation through application elements and actions.
 enum ControlFailure: Error { case blocked(String) }
 let started = ProcessInfo.processInfo.systemUptime
 let deadline = started + 8.0

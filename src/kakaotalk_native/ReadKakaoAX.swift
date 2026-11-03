@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-// Read-only bridge: no AX actions, attribute setters, keyboard, clipboard, DB or network access.
+// Read-only bridge for exposed AX transcript rows.
 // Only an exact, already-open chat window is read. Never traverse its composer contents.
 enum ReadFailure: Error { case blocked(String) }
 let started = ProcessInfo.processInfo.systemUptime

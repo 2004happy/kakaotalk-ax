@@ -5,9 +5,8 @@ description: "카카오톡(카톡)의 방 열기·닫기·본문 읽기·일괄 
 
 # kakaotalk-ax
 
-앱 자동화는 기존 `kakaotalk_automation.NativeAX` 헬퍼와 `kakaotalk_ax_*` 도구를 사용한다.
-모든 읽기·쓰기는 AX만 사용한다. CUA·스크린샷·OCR·좌표 클릭·키 입력·임시 스크립트·DB로 대체하지 않는다.
-로그인이나 기기 등록은 하지 않는다.
+앱 자동화는 `kakaotalk_automation.NativeAX` 헬퍼와 `kakaotalk_ax_*` 도구를 사용한다.
+모든 읽기·쓰기는 제공된 AX 헬퍼를 사용한다.
 
 ## 실행
 
@@ -51,8 +50,7 @@ python3 SKILL_DIR/scripts/kax.py call kakaotalk_ax_send --args-file /absolute/pa
 
 ## 제공 범위
 
-v0.8.0부터 DB 조회·SQL·계정 키 복구·DB 기반 전송 확인·미디어 다운로드 경로는 제거되었다.
-예전 도구 이름을 호출하거나 DB 폴백을 구성하지 않는다. `status`도 AX 창 상태만 확인한다.
+`status`는 열린 창의 AX 상태를 확인한다.
 최근 일주일처럼 기간 전체를 요청받아도 AX에 노출된 범위와 읽지 못한 범위를 구분한다.
 사진·첨부·작성자·생략된 시각·전체 기록을 확인했다고 추측하지 않는다.
 전송 본문은 사용자의 요청을 따른다. 본인 방에 검증을 요청받아 문구를 정해야 한다면

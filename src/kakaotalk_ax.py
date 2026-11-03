@@ -1,4 +1,4 @@
-"""AX-only application operations. No database, protocol client, or Computer Use fallback."""
+"""Native macOS Accessibility operations for KakaoTalk."""
 
 import fcntl
 import hashlib

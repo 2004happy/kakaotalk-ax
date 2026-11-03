@@ -95,7 +95,7 @@ class NativeAX(AXOperations):
         """Read exposed AX rows, newest page first, preserving row order within a page.
 
         A snapshot ID is required for older pages so incoming messages cannot
-        silently shift offsets. Neither this method nor the read bridge uses DB.
+        silently shift offsets. Reads preserve the current window state.
         """
         if not isinstance(window_title, str) or not window_title.strip() or len(window_title.encode("utf-8")) > 4096:
             raise ValueError("An exact open window_title of 1..4096 UTF-8 bytes is required")

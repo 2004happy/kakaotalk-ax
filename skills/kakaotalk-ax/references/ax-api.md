@@ -1,9 +1,9 @@
 # AX 헬퍼 API
 
-v0.8.0의 전체 API는 아래 12개 AX 도구다. 이전 DB 도구와 DB 전송 판정은 제거되었다.
+전체 API는 아래 12개 AX 도구다.
 
 Python 진입점은 `from kakaotalk_automation import NativeAX; ax = NativeAX()`다.
-패키지의 Swift 브리지만 사용하며 임시 스크립트·DB·CUA·별도 인증이 필요하지 않다.
+Python 헬퍼가 패키지에 포함된 Swift AX 브리지를 호출한다.
 
 | Python 메서드 | MCP 도구 |
 |---|---|

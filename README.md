@@ -3,16 +3,8 @@
 macOS 카카오톡을 네이티브 Accessibility(AX) API로 읽고 조작하는 CLI·Python 헬퍼·MCP 서버입니다.
 방 열기·닫기, 본문 읽기, 여러 방 병렬 읽기, 검색, 이전 대화 요청, 메시지 전송을 제공합니다.
 
-**v0.8.0부터 모든 기능은 AX만 사용합니다.** 기존 DB 조회·SQLCipher·계정 키 복구·미디어 다운로드와
-DB 기반 전송 확인 코드는 제거했습니다. LOCO·태블릿 클라이언트·별도 인증·기기 등록도 제공하지 않습니다.
-프로젝트·패키지 이름은 `kakaotalk-ax`, 실행 명령은 `kax`입니다.
-MCP 서버도 같은 CLI의 `kax mcp`로 실행합니다.
-기존 카카오톡 데이터나 로그인 정보, 과거 전송 요청 기록은 삭제하지 않습니다.
-
-v0.9.0에서 저장소·패키지·스킬 이름을 `kakaotalk-ax`로 바꿨습니다. 기존 CLI 세 개는 `kax` 하나로 통합했습니다.
-기존 설치를 바꿀 때는 `python -m pip uninstall kakaotalk-reader` 후 새 패키지를 설치하세요.
-전송 중복 방지 기록과 공용 잠금은 이전 `~/.config/kakaotalk-reader/` 경로를 그대로 사용합니다.
-네이티브 캐시도 이전 경로를 유지합니다. Python `NativeAX` API와 MCP의 `kakaotalk_ax_*` 도구 이름은 동일합니다.
+모든 기능은 실행 중인 공식 카카오톡 앱의 AX 요소를 사용합니다.
+실행 명령은 `kax`이며, MCP 서버는 `kax mcp`로 실행합니다.
 
 ## 설치
 
@@ -29,7 +21,7 @@ python3 -m venv .venv
 .venv/bin/kax status
 ```
 
-`status`는 열린 창의 AX 상태만 읽습니다. 로그인·검색·방 열기·메시지 전송은 하지 않습니다.
+`status`는 열린 창의 AX 상태를 읽습니다.
 네이티브 브리지는 소스 해시에 따라 로컬 캐시에 컴파일합니다. Python 기본 기능에는 추가 런타임 의존성이 없고,
 MCP에는 `mcp>=1.30,<2`, 개발용 스킬 검증에는 PyYAML을 사용합니다.
 
@@ -92,7 +84,7 @@ result = ax.send_result("request-unique-id")
 ```
 
 `ax-call`은 Python 메서드와 같은 이름과 JSON 인수를 사용합니다. 사용자 텍스트는 셸 코드 대신 JSON 파일로
-전달하세요. 예전 `setup`, SQL 조회, DB export, `send`/`prepare`/`result` 명령은 제거되었습니다.
+전달하세요.
 전송은 `ax-call send_message`, 결과 확인은 `ax-call send_result`입니다.
 
 ## MCP / 스킬
@@ -121,8 +113,7 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 | 본문 검색 / 검색 닫기 | `kakaotalk_ax_search` / `kakaotalk_ax_close_search` |
 | 전송 / 결과 확인 | `kakaotalk_ax_send` / `kakaotalk_ax_send_result` |
 
-총 12개 도구입니다. 이전 DB 도구와 `kakaotalk_send`는 더 이상 등록되지 않습니다.
-업데이트 전에 실행한 MCP 서버는 재연결해야 새 도구 목록을 받습니다.
+총 12개 AX 도구를 제공합니다.
 
 저장소의 [카카오톡 스킬](skills/kakaotalk-ax/SKILL.md)은 이 AX 헬퍼를 사용합니다.
 연결된 MCP가 없으면 스킬 클라이언트가 로컬 MCP 서버를 일회성으로 실행합니다.
@@ -140,18 +131,15 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 
 - `rooms`는 현재 보이는 행을 읽습니다. `reportedRowCount`는 앱이 보고한 테이블 행 수이며 반환한 방 목록과 다릅니다.
 - `read_messages`는 열린 창의 현재 AX 노출 행을 최대 1000행 읽습니다. `limit`은 1~500입니다.
-  화면에 표시된 범위를 읽으므로 DB 방식과 같은 계정 전체·기간 전체의 완전성을 보장하지 않습니다.
+  읽은 범위는 `coverage`에 표시하며, 계정 전체·기간 전체의 기록을 보장하지 않습니다.
 - `hasMore`는 수집한 AX 스냅샷 안의 다음 페이지입니다. `nextOffset`과 `snapshotId`를 다음 호출에 전달하고,
   `snapshot_changed`면 첫 페이지부터 다시 읽으세요. `hasMore=false`도 과거 전체 기록의 끝을 뜻하지 않습니다.
 - 본문 없는 행은 `unclassified`와 `axParts`로 보존합니다. 작성자·생략된 시각은 추측하지 않습니다.
-  사진·파일 원본·카드의 숨겨진 정보는 내려받지 않습니다.
 - `load_more`는 AX 스크롤로 이전 대화를 요청합니다. 실제 로딩량은 앱이 결정하며 `historyComplete=false`,
   `endOfHistory=null`입니다. 본문 검색의 반환 항목도 그 시점 AX에 노출된 범위입니다.
 - 여러 방 조회는 같은 시점의 원자적 스냅샷이 아닙니다. 방별 실패와 `partial`을 확인해야 합니다.
 - 열린 창의 백그라운드·최소화 상태에서도 조회가 관찰되었지만, 앱이 AX 요소를 노출해야 합니다.
   닫힌 방은 먼저 열어야 하며 앱 버전이나 창 상태에 따라 접근성 구조가 달라질 수 있습니다.
-- AX 기능이 동작한다는 사실은 카카오의 허용이나 이용 제한 면제를 뜻하지 않습니다.
-  과거 제한의 원인을 DB·AX·특정 문구 중 하나로 확정한 진단 결과는 없습니다.
 
 ## 검증
 
@@ -160,5 +148,4 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 ```
 
 [별도 계정에서 헬퍼와 화면을 비교한 기록](benchmarks/2026-11-03-new-account-comparison.md)에
-관찰한 범위와 한계를 적었습니다. 이전 `benchmarks/` 자료는 당시 구현의 기록이며 현 버전 API 문서가 아닙니다.
-실제 계정의 대화 원문·인증 정보·로컬 DB는 저장소에 포함하지 않습니다.
+관찰한 범위와 한계를 적었습니다.
