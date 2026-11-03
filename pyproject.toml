@@ -4,24 +4,23 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kakaotalk-reader"
-version = "0.3.0"
-description = "KakaoTalk Mac local history and independent tablet LOCO messaging via CLI and MCP"
+version = "0.8.0"
+description = "KakaoTalk native macOS Accessibility reading, navigation and sending via CLI and MCP"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.30,<2"]
-send = ["pymongo>=4.10,<5", "cryptography>=43"]
 dev = ["PyYAML>=6,<7"]
 
 [project.scripts]
-kakaotalk-reader = "kakaotalk_reader:main"
+kakaotalk-reader = "kakaotalk_automation:main"
 kakaotalk-mcp = "kakaotalk_mcp:main"
-kakaotalk-tablet = "kakaotalk_tablet:main"
+kakaotalk-automation = "kakaotalk_automation:main"
 
 [tool.setuptools]
-py-modules = ["kakaotalk_reader", "kakaotalk_service", "kakaotalk_mcp", "kakaotalk_media", "kakaotalk_ui", "kakaotalk_loco", "kakaotalk_tablet"]
+py-modules = ["kakaotalk_mcp", "kakaotalk_automation", "kakaotalk_ax", "kakaotalk_state"]
 packages = ["kakaotalk_native"]
 
 [tool.setuptools.package-data]

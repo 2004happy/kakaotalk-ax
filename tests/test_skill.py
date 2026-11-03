@@ -1,8 +1,5 @@
-import base64
 import importlib.util
 import json
-import stat
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,66 +14,81 @@ spec.loader.exec_module(client)
 
 
 class SkillClientTests(unittest.TestCase):
-    def test_ui_and_old_pc_sender_cannot_be_requested(self):
-        for tool in client.BLOCKED_TOOLS:
+    def test_old_sender_ui_and_unknown_tools_cannot_be_requested(self):
+        for tool in ("kakaotalk_send_self", "kakaotalk_ui_read", "kakaotalk_status",
+                     "kakaotalk_rooms", "kakaotalk_read", "kakaotalk_sql", "kakaotalk_send",
+                     "kakaotalk_send_result", "kakaotalk_get_media", "unknown"):
             with self.subTest(tool=tool), self.assertRaises(ValueError):
                 client.checked_arguments(tool, {})
         with self.assertRaises(ValueError):
-            client.checked_arguments("kakaotalk_status", {"include_ui": True})
+            client.checked_arguments("kakaotalk_read", {})
         with self.assertRaises(ValueError):
-            client.checked_arguments("kakaotalk_status", [])
+            client.checked_arguments("kakaotalk_ax_windows", [])
 
     def test_text_result_keeps_pagination_and_large_ids_exact(self):
         value = {"items": [{"logId": 2**60 + 123}], "hasMore": True, "nextOffset": 100}
         response = SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=json.dumps(value))])
         self.assertEqual(client.render_result(response), value)
 
-    def test_images_are_private_files_and_not_base64_output(self):
-        encoded = base64.b64encode(b"fixture-image").decode()
-        response = SimpleNamespace(isError=False, content=[
-            SimpleNamespace(type="text", text='{"available":true}'),
-            SimpleNamespace(type="image", data=encoded, mimeType="image/png"),
-        ])
-        with tempfile.TemporaryDirectory() as directory, patch.object(client, "IMAGE_CACHE", Path(directory)):
-            result = client.render_result(response)
-            image = Path(result["imageFiles"][0]["path"])
-            self.assertTrue(image.is_absolute())
-            self.assertEqual(image.read_bytes(), b"fixture-image")
-            self.assertEqual(stat.S_IMODE(image.stat().st_mode), 0o600)
-            self.assertNotIn(encoded, json.dumps(result))
+    def test_non_text_content_is_rejected_without_writing_files(self):
+        response = SimpleNamespace(isError=False, content=[SimpleNamespace(type="image")])
+        with self.assertRaises(ValueError):
+            client.render_result(response)
 
-    def test_write_error_is_uncertain_and_read_error_is_distinct(self):
+    def test_read_error_is_reported(self):
         response = SimpleNamespace(isError=True, content=[SimpleNamespace(type="text", text="tool failed")])
         self.assertEqual(client.render_result(response)["status"], "mcp_error")
-        result = client.render_result(response, write_attempt=True)
-        self.assertEqual(result["status"], "outcome_unknown")
-        self.assertFalse(result["retrySafe"])
 
 
 class SkillInvocationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_lost_send_response_is_not_retried(self):
+    async def test_read_timeout_is_not_retried(self):
         session = SimpleNamespace(call_tool=AsyncMock(side_effect=TimeoutError()))
-        state = {"writeStarted": False}
         with self.assertRaises(TimeoutError):
-            await client.call_once(session, "kakaotalk_send", {"room_id": 123, "text": "fixture"}, state)
-        self.assertTrue(state["writeStarted"])
+            await client.call_once(session, "kakaotalk_ax_windows", {})
         session.call_tool.assert_awaited_once()
 
     async def test_blocked_tool_never_reaches_mcp(self):
         session = SimpleNamespace(call_tool=AsyncMock())
-        with self.assertRaises(ValueError):
-            await client.call_once(session, "kakaotalk_ui_read", {}, {})
+        for name in ("kakaotalk_ui_read", "unknown"):
+            with self.subTest(tool=name), self.assertRaises(ValueError):
+                await client.call_once(session, name, {})
         session.call_tool.assert_not_awaited()
 
-    async def test_server_exposes_db_and_tablet_tools_without_ui_or_pc_sender(self):
+    async def test_server_exposes_declared_queries_navigation_and_sends(self):
         tools = await kakaotalk_mcp.mcp.list_tools()
         by_name = {tool.name: tool for tool in tools}
-        self.assertFalse(set(by_name) & client.BLOCKED_TOOLS)
-        self.assertIn("kakaotalk_rooms", by_name)
-        self.assertIn("kakaotalk_send", by_name)
-        self.assertFalse(by_name["kakaotalk_send"].annotations.readOnlyHint)
-        self.assertFalse(by_name["kakaotalk_send"].annotations.idempotentHint)
-        self.assertNotIn("include_ui", by_name["kakaotalk_status"].inputSchema.get("properties", {}))
+        self.assertEqual(set(by_name), client.READ_ONLY_TOOLS | client.SEND_TOOLS | client.UI_TOOLS)
+        self.assertEqual(len(by_name), 12)
+        writes = {tool.name for tool in tools if not tool.annotations.readOnlyHint}
+        self.assertEqual(writes, client.SEND_TOOLS | client.UI_TOOLS)
+        for name in client.SEND_TOOLS:
+            self.assertIn("operation_id", by_name[name].inputSchema["required"])
+            self.assertFalse(by_name[name].annotations.idempotentHint)
+
+    async def test_ax_tools_delegate_to_native_helper(self):
+        with patch("kakaotalk_automation.NativeAX") as native:
+            native.return_value.windows.return_value = {"status": "ok", "items": []}
+            native.return_value.read_messages.return_value = {"status": "ok", "items": [], "databaseCalls": 0}
+            self.assertEqual(json.loads(kakaotalk_mcp.kakaotalk_ax_windows())["status"], "ok")
+            self.assertEqual(json.loads(kakaotalk_mcp.kakaotalk_ax_read("Fixture", 2))["databaseCalls"], 0)
+            native.return_value.read_messages.assert_called_once_with("Fixture", 2, 0, "")
+
+    async def test_send_tool_error_remains_uncertain_with_original_operation_id(self):
+        response = SimpleNamespace(isError=True, content=[SimpleNamespace(type="text", text="lost result")])
+        session = SimpleNamespace(call_tool=AsyncMock(return_value=response))
+        result = await client.call_once(session, client.SEND_TOOL, {"operation_id": "intent-1"})
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertEqual(result["operationId"], "intent-1")
+        self.assertFalse(result["retrySafe"])
+        session.call_tool.assert_awaited_once()
+
+    async def test_ax_send_error_is_uncertain_and_never_retried(self):
+        response = SimpleNamespace(isError=True, content=[SimpleNamespace(type="text", text="lost result")])
+        session = SimpleNamespace(call_tool=AsyncMock(return_value=response))
+        result = await client.call_once(session, "kakaotalk_ax_send", {"operation_id": "ax-intent"})
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertEqual(result["operationId"], "ax-intent")
+        session.call_tool.assert_awaited_once()
 
 
 if __name__ == "__main__":

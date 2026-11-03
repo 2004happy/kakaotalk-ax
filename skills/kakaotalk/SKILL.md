@@ -1,84 +1,59 @@
 ---
 name: kakaotalk
-description: "카카오톡(카톡) 대화 조회·검색·요약, 채팅방과 첨부파일 확인, 사용자가 요청한 기존 방 메시지 전송. 로컬 DB 조회와 별도 태블릿 LOCO 전송을 사용하며 컴퓨터 유즈·AX·앱 조작은 제외한다."
+description: "카카오톡(카톡)의 방 열기·닫기·본문 읽기·일괄 읽기·검색·이전 대화 요청·메시지 전송을 네이티브 AX 헬퍼로 수행한다."
 ---
 
 # 카카오톡
 
-로컬 Mac 카카오톡 DB로 읽고, 별도로 등록한 Android 태블릿 LOCO 세션으로 보낸다.
-PC 앱의 인증을 갱신하거나 PC 프로필로 새 로그인하지 않는다. 컴퓨터 유즈, AX,
-AppleScript, 키 입력·마우스·클립보드를 전송 경로로 사용하지 않는다.
+앱 자동화는 기존 `kakaotalk_automation.NativeAX` 헬퍼와 `kakaotalk_ax_*` 도구를 사용한다.
+모든 읽기·쓰기는 AX만 사용한다. CUA·스크린샷·OCR·좌표 클릭·키 입력·임시 스크립트·DB로 대체하지 않는다.
+로그인이나 기기 등록은 하지 않는다.
 
 ## 실행
 
-필요한 `kakaotalk_*` MCP 도구가 연결되어 있으면 직접 사용한다. 도구가 없거나 기존 연결의
-스키마가 다르면 이 스킬의 클라이언트로 최신 MCP 서버를 호출한다.
-`SKILL_DIR`는 지금 읽은 스킬 폴더의 절대 경로로 바꾼다.
+연결된 `kakaotalk_ax_*` MCP 도구를 사용한다. 연결이 없거나 스키마가 다르면 아래 클라이언트로
+최신 MCP를 호출한다. `SKILL_DIR`는 이 스킬 폴더의 절대 경로로 바꾼다.
 
 ```bash
 python3 SKILL_DIR/scripts/kakaotalk.py status
 python3 SKILL_DIR/scripts/kakaotalk.py tools
-python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_rooms --args-file /absolute/path/arguments.json
-python3 SKILL_DIR/scripts/kakaotalk.py send --room-id ROOM_ID --text-file /absolute/path/message.txt
+python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_ax_rooms --args-file /absolute/path/arguments.json
+python3 SKILL_DIR/scripts/kakaotalk.py call kakaotalk_ax_send --args-file /absolute/path/request.json
 ```
 
-클라이언트는 `~/Documents/workspace/kakaotalk-reader/.venv`를 자동 사용한다.
-체크아웃 위치가 달라졌을 때만 `--root` 또는 `KAKAOTALK_READER_ROOT`로 바꾼다.
-인수 JSON과 보낼 본문은 파일로 전달한다. 사용자 텍스트를 셸 코드에 보간하지 않는다.
-미디어 응답의 이미지 파일은 `imageFiles`의 절대 경로로 반환하므로 필요하면 이미지 도구로 연다.
+클라이언트는 `~/Documents/workspace/kakaotalk-reader/.venv`를 사용한다. 체크아웃이 다르면
+`--root` 또는 `KAKAOTALK_READER_ROOT`를 지정한다. 사용자 텍스트를 셸 코드에 넣지 않고 JSON 파일로 전달한다.
 
-## 조회·요약
+## AX 자동화
 
-- 먼저 `kakaotalk_status`로 DB 범위와 태블릿 준비 상태를 확인한다. 이 호출은 새 로그인을 하지 않는다.
-- 방은 `kakaotalk_rooms(query=...)`로 찾고 `chatId`를 사용한다. 동명이거나 부분 일치가 여러 개면 임의로 고르지 않는다.
-  `nameSource`/`nameExact`, `membersComplete`로 이름과 참여자 정보의 근거를 구분한다.
-- `kakaotalk_read`는 특정 방, `kakaotalk_recent`는 전체 방, `kakaotalk_search`는 본문·카드·답장 검색이다.
-  목록은 `items`, `hasMore`, `nextOffset` 형식이다. 전체 범위를 요청받으면 필요한 페이지를 끝까지 읽는다.
-- 최근 일주일은 `since="last7d"`, `until="now"`를 쓴다. `-7d`는 7일 전 자정으로 의미가 다르다.
-  `text`가 카드 전체 본문을 포함한다. `message`만 읽으면 긴 내용을 놓칠 수 있다.
-- 사진·파일은 `kakaotalk_media`로 목록을 확인한 뒤 `kakaotalk_get_media(room_id, log_id, index)`로 읽는다.
-  만료된 원격 첨부파일은 `media_unavailable`로 설명한다. 토큰·원문 다운로드 URL을 꺼내 출력하지 않는다.
-- 공지·북마크·폴더·일정·활동 집계는 각각 대응하는 도구를 쓴다. 상세 인수는 `tools`의 실제 스키마로 확인한다.
-- DB에 없는 모바일 기록을 읽었다고 주장하지 않는다. 누락을 메우려고 UI 자동화로 우회하지 않는다.
+- 열린 창은 `kakaotalk_ax_windows`,
+  방 목록은 `kakaotalk_ax_rooms`로 확인한다. 정확한 방 이름으로 `kakaotalk_ax_open`을 호출한다.
+  앱의 방 검색은 `kakaotalk_ax_search_rooms`이며 빈 검색어는 해제다. 동명 방은 임의로 선택하지 않는다.
+- 한 방은 `kakaotalk_ax_read`, 여러 방은 `kakaotalk_ax_read_many(window_titles=[...])`를 사용한다.
+  일괄 도구가 창 열기와 병렬 읽기를 수행하므로 별도의 제어 코드나 스레드를 작성하지 않는다.
+  `close_after=True`이면 그 호출이 새로 연 창만 닫는다. 창만 닫기는 `kakaotalk_ax_close`이며 초안은 보존한다.
+- `items`에는 현재 AX에 노출된 행만 포함된다. `kind=text`의 `text`가 메시지 본문이고,
+  나머지 행은 `unclassified`/`axParts`에 보존한다. 작성자와 생략된 시각은 추측하지 않는다.
+- `hasMore=true`면 `nextOffset`/`snapshotId`를 다음 호출의 `offset`/`snapshot_id`로 전달한다.
+  `snapshot_changed`면 첫 페이지부터 다시 읽는다. `hasMore=false`라도 전체 과거 기록을 다 읽었다는 뜻은 아니다.
+- 이전 대화는 `kakaotalk_ax_load_more(window_title, pages=1)`로 제한해서 요청한다. 추가 행이 없다는
+  결과만으로 전체 과거 기록의 끝이라고 판단하지 않는다. 최대 1000행이며 `coverage`와 실제 AX 결과를 확인한다.
+- `kakaotalk_ax_search(window_title, query)`는 앱 검색을 실행하고 노출된 본문 중 일치한 항목을 반환한다.
+  전체 검색 인덱스를 수집했다고 설명하지 않는다. `use_app_search=False`는 노출 본문만 검사한다.
+  `kakaotalk_ax_close_search`로 검색 UI를 닫는다.
+- AX 전송은 `kakaotalk_ax_send(window_title, text, operation_id)`다. 요청 ID를 한 번 정해서 보관한다.
+  본인 방만 확인할 때는 `require_self=True`를 쓴다. 기존 초안은 지우지 않는다.
+  `observed_in_ax`는 새 텍스트와 빈 입력창을 관찰한 결과이며 작성자·서버 ACK·읽음 확인이 아니다.
+  타임아웃·`outcome_unknown`에서는 원래 ID로 `kakaotalk_ax_send_result`만 조회하고 새 ID로 재발송하지 않는다.
+- MCP 연결이 없으면 CLI `kakaotalk-automation ax-call METHOD --args-file /absolute/path/arguments.json`을
+  사용한다. 메서드·도구 대응과 정확한 인수는 [AX API](references/ax-api.md)를 읽는다.
 
-예: 방 검색 인수 파일은 `{"query":"팀방","limit":100,"offset":0}`,
-기간 조회는 `{"room_id":123,"since":"last7d","until":"now","limit":100,"offset":0}`이다.
-실제 ID로 바꾸고, 기존 요청과 무관한 방을 추가 탐색하지 않는다.
 
-## 메시지 전송
+## 제공 범위
 
-1. 사용자의 요청에서 수신 방과 보낼 내용을 확정한다. 이미 명확히 허용된 일상 메시지는
-   다시 허락을 묻지 않고 처리한다. 불명확한 대상은 먼저 확인한다. 예전 테스트 요청을 새 전송의 허가로 사용하지 않는다.
-2. `kakaotalk_rooms`/`kakaotalk_room`으로 실제 방 ID를 확인한다. 나와의 채팅은 type=5로 찾는다.
-   전송 도구는 자기 채팅 전용이 아니며 기존 1:1·단톡·오픈방 ID를 받는다.
-3. `kakaotalk_status.tablet.status`가 `ready`인지 확인한다. `kakaotalk_send(room_id, text)`를 **한 번** 호출한다.
-   파일 전송이나 메시지 수정·삭제는 구현되지 않았으므로 다른 기능처럼 가장하지 않는다.
-4. `sent`와 서버 ACK를 확인한다. 필요하면 반환된 `logId`로 `kakaotalk_message`를 조회해
-   본인 발신·본문·ID가 같은지 확인한다. DB 반영이 늦으면 읽기만 몇 차례 다시 확인한다.
-   서버 ACK와 Mac DB 동기화는 구분해서 보고한다.
-
-`outcome_unknown`, `accepted_unverified`, 전송 호출 중의 타임아웃·연결 종료는 **재발송하지 않는다**.
-먼저 기존 메시지 기록을 조회한다. 실패처럼 보인다는 이유로 같은 내용을 다시 보내지 않는다.
-기존 PC 로그인 풀림이 관측되면 쓰기를 멈추고 그 상태를 알린다. 자동 PC 재인증으로 복구하려 하지 않는다.
-
-## 인증·운영
-
-프로젝트의 `.venv/bin/kakaotalk-tablet status`는 로컬 준비 상태,
-`verify`는 저장된 **태블릿** 인증으로 접속하고 PC 소켓 연속성을 확인한다.
-상태가 `ready`라는 것만으로 현재 토큰 유효성이나 장기 안정성을 단정하지 않는다.
-
-인증이 없거나 `LOGINLIST_status_-950`이면 사용자 터미널에서 한 번 다음을 실행해야 한다.
-
-```bash
-~/Documents/workspace/kakaotalk-reader/.venv/bin/kakaotalk-tablet login
-```
-
-비밀번호는 채팅으로 받거나 저장하지 않는다. 최초 등록의 휴대폰 승인은 사용자가 진행한다.
-`--replace-tablet`는 기존 태블릿 자리를 교체할 수 있으므로 그 교체를 허용받은 경우에만 사용한다.
-`verification_required`이면 먼저 `verify`를 실행한다. 소켓으로 확인할 수 없을 때만 사용자에게
-PC 앱의 로그인 유지 여부를 확인받고 `confirm-desktop`을 사용한다.
-기존 `loco-session.json`·Mac 자동 로그인 키·PC 로그인 실험으로 우회하지 않는다.
-
-구현과 상세 검증 기록은 프로젝트의 `README.md`, `experiments/README.md`에 있다.
-2026-10-30의 실전송 검증은 나와의 채팅 한 건과 전후 32.4초의 PC 연결 유지·Mac DB 동기화다.
-일반 방 ID 전달은 테스트했지만 해당 날짜에 다른 사람의 방으로 실제 테스트 메시지를 보내지는 않았다.
+v0.8.0부터 DB 조회·SQL·계정 키 복구·DB 기반 전송 확인·미디어 다운로드 경로는 제거되었다.
+예전 도구 이름을 호출하거나 DB 폴백을 구성하지 않는다. `status`도 AX 창 상태만 확인한다.
+최근 일주일처럼 기간 전체를 요청받아도 AX에 노출된 범위와 읽지 못한 범위를 구분한다.
+사진·첨부·작성자·생략된 시각·전체 기록을 확인했다고 추측하지 않는다.
+전송 본문은 사용자의 요청을 따른다. 본인 방에 검증을 요청받아 문구를 정해야 한다면
+자연스러운 짧은 문장을 사용하고, 사용자가 원하지 않은 기술 설명이나 표식을 넣지 않는다.

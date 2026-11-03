@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-01",
+  "timezone": "Asia/Seoul",
+  "packageVersion": "0.5.0",
+  "destination": "self_chat_only",
+  "methodology": {
+    "order": [
+      "baseline-1",
+      "helper-1",
+      "baseline-2",
+      "helper-2"
+    ],
+    "startingState": "Same already-open self-chat window with an empty composer; sender binary prebuilt",
+    "baseline": "DB preflight, model-mediated AX discovery, setValue, AX-index click, DB confirmation",
+    "helper": "One stdio MCP send call: DB preflight, compiled AXValue and AXPress, DB confirmation",
+    "baselineTiming": "Wall clock from DB preflight start to DB confirmation, including agent/tool round trips",
+    "helperTiming": "MCP subprocess start to verified result production, including stdio/server startup; excludes a later polling round trip in trial 1",
+    "limitations": [
+      "Two trials per method, not a statistical benchmark",
+      "Different native implementations and orchestration; not an isolated batching-only comparison",
+      "No room-opening/navigation cost in either method",
+      "Agent reasoning latency is variable; helper trial 1 required a transport poll"
+    ],
+    "baselineUiServiceTiming": "Sum of three CUA tool wall times, excluding DB preparation/confirmation and model round trips"
+  },
+  "coldNativeBuildMs": 1861.0,
+  "runs": [
+    {
+      "method": "baseline",
+      "trial": 1,
+      "status": "verified_in_local_db",
+      "automationApiCalls": 5,
+      "agentToolCalls": 5,
+      "pollCalls": 0,
+      "observedDurationMs": 26588.6,
+      "dispatchToolError": true,
+      "uiToolServiceTimesMs": [
+        1975.4,
+        3491.5,
+        157.2
+      ],
+      "uiToolServiceTotalMs": 5624.1
+    },
+    {
+      "method": "helper",
+      "trial": 1,
+      "status": "verified_in_local_db",
+      "automationApiCalls": 1,
+      "agentToolCalls": 2,
+      "pollCalls": 1,
+      "observedDurationMs": 3117.1,
+      "helperStagesMs": {
+        "prepare": 932.5,
+        "build": 1.8,
+        "native": 406.2,
+        "confirm": 77.0,
+        "total": 1418.0
+      },
+      "nativeAxResult": -25200,
+      "nativeReadConversation": false
+    },
+    {
+      "method": "baseline",
+      "trial": 2,
+      "status": "verified_in_local_db",
+      "automationApiCalls": 5,
+      "agentToolCalls": 6,
+      "pollCalls": 1,
+      "observedDurationMs": 39285.5,
+      "dispatchToolError": true,
+      "uiToolServiceTimesMs": [
+        3111.4,
+        3448.5,
+        3367.9
+      ],
+      "uiToolServiceTotalMs": 9927.8
+    },
+    {
+      "method": "helper",
+      "trial": 2,
+      "status": "verified_in_local_db",
+      "automationApiCalls": 1,
+      "agentToolCalls": 1,
+      "pollCalls": 0,
+      "observedDurationMs": 2122.3,
+      "helperStagesMs": {
+        "prepare": 725.2,
+        "build": 2.6,
+        "native": 355.0,
+        "confirm": 69.0,
+        "total": 1152.7
+      },
+      "nativeAxResult": -25200,
+      "nativeReadConversation": false
+    }
+  ],
+  "verification": {
+    "exactMessagesInSelfRoom": 4,
+    "eachBodyMatchedExactlyOnce": true,
+    "ownAuthorVerified": true,
+    "positiveLogIdsVerified": true,
+    "sameOperationRepeatDeduplicated": true,
+    "repeatNativeCalls": 0,
+    "messagesAddedByRepeat": 0,
+    "verifiedRuns": [
+      "baseline-1",
+      "baseline-2",
+      "helper-1",
+      "helper-2"
+    ],
+    "liveExistingDraftPreserved": true,
+    "draftGuardMessagesSent": 0
+  }
+}

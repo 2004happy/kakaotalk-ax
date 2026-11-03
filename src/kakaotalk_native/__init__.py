@@ -1,1 +1,1 @@
-"""Bundled, read-only macOS accessibility bridge."""
+"""Bundled macOS AX reader, navigation controller and one-shot message writer."""
