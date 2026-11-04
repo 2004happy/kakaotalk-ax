@@ -4,7 +4,8 @@
 import json
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import ToolAnnotations, TextContent, ImageContent
+from mcp.server.fastmcp.utilities.types import Image
 
 mcp = FastMCP("kakaotalk-ax", instructions=(
     "카카오톡의 모든 기능은 kakaotalk_ax_* 네이티브 접근성 헬퍼를 사용합니다. "
@@ -17,7 +18,7 @@ mcp = FastMCP("kakaotalk-ax", instructions=(
     "전송은 접근성 입력창과 AXPress 버튼을 사용하며 기존 초안을 보존합니다. "
     "outcome_unknown이나 타임아웃이면 원래 ID로 kakaotalk_ax_send_result만 조회하고 재전송하지 마세요. "
     "observed_in_ax는 새 텍스트와 빈 입력창의 관찰이며 작성자·서버 ACK·읽음 확인이 아닙니다. "
-    "스크린샷·OCR·Computer Use로 헬퍼를 대체하지 마세요."
+    "사진은 kakaotalk_ax_read_attachment로 이미지 파일을 받아 직접 확인하세요. OCR은 선택 사항이며 원문과 구분하세요."
 ))
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 SEND = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
@@ -48,12 +49,30 @@ def kakaotalk_ax_read(window_title: str, limit: int = 50, offset: int = 0, snaps
     최신 행부터 페이지를 선택하고 페이지 안에서는 화면의 행 순서를 유지합니다.
     다음 페이지는 nextOffset과 snapshotId를 offset/snapshot_id로 전달하세요.
     새 메시지 등으로 행이 바뀌면 snapshot_changed를 반환합니다. offset=0부터 다시 읽으세요.
-    text가 없는 행도 unclassified로 보존합니다. 작성자는 아직 판별하지 않으며 미노출 시각도 null입니다.
+    이미지는 attachment로, 나머지 본문 없는 행은 unclassified로 보존합니다. 작성자는 아직 판별하지 않으며 미노출 시각도 null입니다.
     hasMore는 수집한 최대 1000행 안의 페이지 유무이며, 전체 대화의 완전성을 뜻하지 않습니다.
     읽기는 현재 창 상태와 초안을 보존합니다.
     """
     from kakaotalk_automation import NativeAX
     return output(NativeAX().read_messages(window_title, limit, offset, snapshot_id))
+
+
+@mcp.tool(annotations=NAVIGATE)
+def kakaotalk_ax_read_attachment(window_title: str, row_index: int, snapshot_id: str,
+                                 output_path: str | None = None, ocr: bool = False) -> list[TextContent | ImageContent]:
+    """한 이미지 첨부를 AX로 찾아 해당 창의 사진 영역을 PNG 파일로 반환합니다.
+
+    read의 최신 snapshotId/rowIndex가 필요합니다. macOS 14.2+ 및 화면 기록 권한이 필요합니다.
+    잠시 AX 스크롤한 후 가능한 경우 복원합니다. 원본 사진이 아닌 화면 해상도 이미지입니다.
+    imagePath의 이미지를 직접 보세요. output_path 미지정 시 임시 PNG입니다.
+    ocr=True일 때만 로컬 Vision OCR을 추가합니다. OCR은 부정확할 수 있으며 메시지 원문이 아닙니다.
+    """
+    from kakaotalk_automation import NativeAX
+    result = NativeAX().read_attachment(window_title, row_index, snapshot_id, output_path, ocr)
+    content: list[TextContent | ImageContent] = [TextContent(type="text", text=output(result))]
+    if result.get("status") == "ok" and result.get("imagePath"):
+        content.append(Image(path=result["imagePath"]).to_image_content())
+    return content
 
 
 @mcp.tool(annotations=UI)
@@ -117,15 +136,15 @@ def kakaotalk_ax_load_more(window_title: str, pages: int = 1) -> str:
 
 @mcp.tool(annotations=UI)
 def kakaotalk_ax_search(window_title: str, query: str, limit: int = 100, load_pages: int = 0,
-                        case_sensitive: bool = False, use_app_search: bool = True) -> str:
-    """방을 열고 앱의 본문 검색을 실행한 뒤 AX에 노출된 본문 중 일치한 행을 반환합니다.
+                        case_sensitive: bool = False, use_app_search: bool = True, max_steps: int = 10, context_rows: int = 2) -> str:
+    """앱 검색의 이전 결과를 최대 max_steps(1..50)회 방문해 본문과 주변 context_rows행을 반환합니다.
 
     load_pages=1..10이면 검색 전에 이전 대화 로딩을 요청합니다.
     use_app_search=False면 앱 검색창을 건드리지 않고 노출된 본문에서만 문자 그대로 검색합니다.
-    검색 결과는 searchScope/coverage 범위에 한정됩니다. 전체 과거의 모든 일치 항목을 보장하지 않습니다.
+    searchVerified/stopReason으로 결과 확인 여부와 중단 이유를 확인하세요. 겹치는 스냅샷의 동일 메시지가 반복될 수 있습니다. 검색 결과는 searchScope/coverage 범위에 한정됩니다. 전체 과거의 모든 일치 항목을 보장하지 않습니다.
     """
     from kakaotalk_automation import NativeAX
-    return output(NativeAX().search_messages(window_title, query, limit, load_pages, case_sensitive, use_app_search))
+    return output(NativeAX().search_messages(window_title, query, limit, load_pages, case_sensitive, use_app_search, max_steps, context_rows))
 
 
 @mcp.tool(annotations=UI)

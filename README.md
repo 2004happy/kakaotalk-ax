@@ -108,12 +108,13 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 | 보이는 채팅방 목록 | `kakaotalk_ax_rooms` |
 | 앱의 방 검색 | `kakaotalk_ax_search_rooms` |
 | 방 열기 / 창 닫기 | `kakaotalk_ax_open` / `kakaotalk_ax_close` |
+| 이미지 첨부 읽기 | `kakaotalk_ax_read_attachment` |
 | 한 방 / 여러 방 읽기 | `kakaotalk_ax_read` / `kakaotalk_ax_read_many` |
 | 이전 대화 요청 | `kakaotalk_ax_load_more` |
 | 본문 검색 / 검색 닫기 | `kakaotalk_ax_search` / `kakaotalk_ax_close_search` |
 | 전송 / 결과 확인 | `kakaotalk_ax_send` / `kakaotalk_ax_send_result` |
 
-총 12개 AX 도구를 제공합니다.
+총 13개 AX 도구를 제공합니다.
 
 저장소의 [카카오톡 스킬](skills/kakaotalk-ax/SKILL.md)은 이 AX 헬퍼를 사용합니다.
 연결된 MCP가 없으면 스킬 클라이언트가 로컬 MCP 서버를 일회성으로 실행합니다.
@@ -134,9 +135,9 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
   읽은 범위는 `coverage`에 표시하며, 계정 전체·기간 전체의 기록을 보장하지 않습니다.
 - `hasMore`는 수집한 AX 스냅샷 안의 다음 페이지입니다. `nextOffset`과 `snapshotId`를 다음 호출에 전달하고,
   `snapshot_changed`면 첫 페이지부터 다시 읽으세요. `hasMore=false`도 과거 전체 기록의 끝을 뜻하지 않습니다.
-- 본문 없는 행은 `unclassified`와 `axParts`로 보존합니다. 작성자·생략된 시각은 추측하지 않습니다.
+- 이미지 행은 `kind=attachment`와 `attachments`로, 나머지 본문 없는 행은 `unclassified`와 `axParts`로 보존합니다. 작성자·생략된 시각은 추측하지 않습니다.
 - `load_more`는 AX 스크롤로 이전 대화를 요청합니다. 실제 로딩량은 앱이 결정하며 `historyComplete=false`,
-  `endOfHistory=null`입니다. 본문 검색의 반환 항목도 그 시점 AX에 노출된 범위입니다.
+  `endOfHistory=null`입니다. 본문 검색은 이전 결과 버튼을 최대 `max_steps`번 순회하고 각 시점의 AX 노출 본문과 주변 대화를 반환합니다.
 - 여러 방 조회는 같은 시점의 원자적 스냅샷이 아닙니다. 방별 실패와 `partial`을 확인해야 합니다.
 - 열린 창의 백그라운드·최소화 상태에서도 조회가 관찰되었지만, 앱이 AX 요소를 노출해야 합니다.
   닫힌 방은 먼저 열어야 하며 앱 버전이나 창 상태에 따라 접근성 구조가 달라질 수 있습니다.
@@ -146,6 +147,36 @@ MCP 설정 예시입니다. 경로를 실제 체크아웃으로 바꾸세요.
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+## 이미지 첨부와 검색 결과
+
+```python
+page = ax.read_messages("정확한 방 이름", limit=100)
+photo = next(item for item in page["items"] if item["kind"] == "attachment")
+image = ax.read_attachment("정확한 방 이름", photo["rowIndex"], page["snapshotId"])
+print(image["imagePath"])  # 직접 볼 수 있는 PNG 이미지. 기본값은 OCR 없음.
+# 필요한 경우에만 ocr=True를 전달합니다. 결과는 별도의 ocr 필드에 들어갑니다.
+
+results = ax.search_messages("정확한 방 이름", "검색어", max_steps=10, context_rows=4)
+```
+
+이미지 읽기는 macOS 14.2+와 화면 기록 권한이 필요합니다. AX로 식별한 한 사진을 창 내부에서
+스크롤해 보이게 하고 해당 창의 사진 영역만 캡처합니다. 원본 첨부 파일 다운로드가 아니므로
+해상도가 낮을 수 있습니다. 물리 마우스·키보드 입력, 클립보드, DB는 사용하지 않습니다.
+스크롤은 다른 변경이 관찰되지 않을 때 복원합니다. `output_path`를 생략하면 권한 0600의
+임시 PNG를 반환하며, 호출자가 사용 후 삭제할 수 있습니다. 현재 스냅샷과 맞지 않는 행은
+거부하므로 `snapshot_changed`면 다시 읽으세요. 기본 읽기는 캡처나 OCR을 하지 않습니다.
+
+검색은 `searchVerified`와 `stopReason`을 확인하세요. 검색 입력 후 실제 일치 본문이 보이고
+상태가 안정된 경우만 검증된 검색으로 반환합니다. 이전 결과 이동이 확인되지 않으면
+이미 얻은 항목을 보존하면서 `partial`로 반환합니다. 결과가 없다는 것을 확인하지 못한
+경우도 성공으로 단정하지 않습니다. `max_steps`는 1..50, `context_rows`는 0..10입니다.
+검색 도구의 네이티브 이전/다음 버튼 식별은 현재 관찰한 AX 툴바 구조에 의존하며,
+앱 업데이트로 구조가 바뀌면 `search_toolbar_layout_unknown`으로 중단합니다.
+`navigation_exhausted`도 앱이 노출한 검색 탐색의 끝이며 계정 전체 기록의 완전성을 보장하지 않습니다.
+각 항목에 `snapshotId`와 `searchVisit`을 붙이며, 서로 겹치는 스냅샷은 같은 메시지를
+다시 포함할 수 있습니다(`duplicatesPossible`). 동일 본문의 서로 다른 메시지를 임의로 합치지 않습니다.
+`total`은 수집한 일치 항목 수이며 고유 메시지 총수가 아닙니다.
 
 ## 라이선스
 

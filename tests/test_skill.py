@@ -35,6 +35,12 @@ class SkillClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.render_result(response)
 
+    def test_attachment_image_keeps_local_path_without_dumping_base64(self):
+        value = {"status": "ok", "imagePath": "/tmp/fixture.png", "ocrPerformed": False}
+        response = SimpleNamespace(isError=False, content=[
+            SimpleNamespace(type="text", text=json.dumps(value)), SimpleNamespace(type="image", data="not-printed")])
+        self.assertEqual(client.render_result(response), value)
+
     def test_read_error_is_reported(self):
         response = SimpleNamespace(isError=True, content=[SimpleNamespace(type="text", text="tool failed")])
         self.assertEqual(client.render_result(response)["status"], "mcp_error")
@@ -58,7 +64,7 @@ class SkillInvocationTests(unittest.IsolatedAsyncioTestCase):
         tools = await kakaotalk_mcp.mcp.list_tools()
         by_name = {tool.name: tool for tool in tools}
         self.assertEqual(set(by_name), client.READ_ONLY_TOOLS | client.SEND_TOOLS | client.UI_TOOLS)
-        self.assertEqual(len(by_name), 12)
+        self.assertEqual(len(by_name), 13)
         writes = {tool.name for tool in tools if not tool.annotations.readOnlyHint}
         self.assertEqual(writes, client.SEND_TOOLS | client.UI_TOOLS)
         for name in client.SEND_TOOLS:
@@ -72,6 +78,23 @@ class SkillInvocationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(kakaotalk_mcp.kakaotalk_ax_windows())["status"], "ok")
             self.assertEqual(json.loads(kakaotalk_mcp.kakaotalk_ax_read("Fixture", 2))["databaseCalls"], 0)
             native.return_value.read_messages.assert_called_once_with("Fixture", 2, 0, "")
+
+    async def test_attachment_tool_returns_image_content_and_metadata(self):
+        from mcp.types import ImageContent
+        with patch("kakaotalk_automation.NativeAX") as native, patch("kakaotalk_mcp.Image") as image:
+            native.return_value.read_attachment.return_value = {
+                "status": "ok", "imagePath": "/tmp/fixture.png", "ocrPerformed": False}
+            image.return_value.to_image_content.return_value = ImageContent(type="image", data="AA==", mimeType="image/png")
+            result = kakaotalk_mcp.kakaotalk_ax_read_attachment("Fixture", 4, "a" * 24)
+            self.assertEqual([part.type for part in result], ["text", "image"])
+            self.assertFalse(json.loads(result[0].text)["ocrPerformed"])
+            native.return_value.read_attachment.assert_called_once_with("Fixture", 4, "a" * 24, None, False)
+
+    async def test_blocked_attachment_tool_returns_no_image(self):
+        with patch("kakaotalk_automation.NativeAX") as native:
+            native.return_value.read_attachment.return_value = {"status": "snapshot_changed"}
+            result = kakaotalk_mcp.kakaotalk_ax_read_attachment("Fixture", 4, "a" * 24)
+            self.assertEqual([part.type for part in result], ["text"])
 
     async def test_send_tool_error_remains_uncertain_with_original_operation_id(self):
         response = SimpleNamespace(isError=True, content=[SimpleNamespace(type="text", text="lost result")])

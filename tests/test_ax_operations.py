@@ -48,6 +48,8 @@ class FixtureAX(AXOperations):
             return {"status": "ok"}
         if action == "load_older" and self.history:
             self.rows[name].insert(0, self.history.pop(0))
+        if action in ("search_query", "search_previous"):
+            return {"status": "ok", "searchVerified": True, "searchState": {"previousEnabled": False}}
         return {"status": "ok"}
 
     def read_messages(self, window_title, limit=50, offset=0, snapshot_id=""):

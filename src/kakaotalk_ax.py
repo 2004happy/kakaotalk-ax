@@ -200,12 +200,19 @@ class AXOperations:
                     "exposedRowsAfter": after["coverage"]["exposedRowCount"],
                     "endOfHistory": None, "historyComplete": False, "after": after, "databaseCalls": 0}
 
-    def search_messages(self, window_title, query, limit=100, load_pages=0, case_sensitive=False, use_app_search=True):
-        """Literal search over bounded AX-exposed bodies, optionally requesting older pages first."""
+    def search_messages(self, window_title, query, limit=100, load_pages=0, case_sensitive=False,
+                        use_app_search=True, max_steps=10, context_rows=2):
+        """Visit bounded previous app results and preserve each snapshot's context.
+
+        Overlapping snapshots can repeat a message. We deliberately do not merge
+        equal bodies, since distinct messages can have identical text and no timestamp.
+        """
         title(window_title)
         query_text(query)
         integer(limit, "limit", 1, 500)
         integer(load_pages, "load_pages", 0, 10)
+        integer(max_steps, "max_steps", 1, 50)
+        integer(context_rows, "context_rows", 0, 10)
         boolean(case_sensitive, "case_sensitive")
         boolean(use_app_search, "use_app_search")
         with ui_session():
@@ -215,27 +222,73 @@ class AXOperations:
             history = self.load_more(window_title, load_pages) if load_pages else None
             if history and history.get("status") != "ok":
                 return history
-            native_search = self._control("search_query", windowTitle=window_title, query=query) if use_app_search else None
-            if native_search and native_search.get("status") != "ok":
-                return native_search
-            page = self.read_messages(window_title, limit=500)
-            if page.get("status") != "ok":
-                return page
-            rows = page["items"]
-            while page["hasMore"]:
-                older = self.read_messages(window_title, limit=500, offset=page["nextOffset"], snapshot_id=page["snapshotId"])
-                if older.get("status") != "ok":
-                    return older
-                rows = older["items"] + rows
-                page = older
+            visits, matches, seen_snapshots = [], [], set()
+            searched_rows = 0
+            stop_reason = "step_limit" if use_app_search else "exposed_rows_only"
+            verified = True
+            coverage = {"historyComplete": False}
+            snapshot = None
             needle = query if case_sensitive else query.casefold()
-            matches = [row for row in rows if row.get("text") is not None and
-                       needle in (row["text"] if case_sensitive else row["text"].casefold())]
-            return {"status": "ok", "source": "macos_accessibility", "windowTitle": window_title,
-                    "query": query, "items": matches[-limit:], "total": len(matches), "truncated": len(matches) > limit,
-                    "coverage": page["coverage"], "searchedRows": len(rows), "historyRequested": bool(load_pages),
-                    "searchScope": "currently_exposed_bodies", "snapshotId": page["snapshotId"], "databaseCalls": 0,
-                    "appSearchUsed": use_app_search, "nativeSearch": native_search}
+            for step in range(max_steps if use_app_search else 1):
+                native = self._control("search_query" if step == 0 else "search_previous",
+                                       windowTitle=window_title, query=query) if use_app_search else None
+                if native and native.get("searchOutcome") == "navigation_exhausted":
+                    visits.append(native)
+                    stop_reason = "navigation_exhausted"
+                    break
+                if native:
+                    visits.append(native)
+                    verified = verified and native.get("searchVerified") is True
+                    if native.get("status") not in ("ok", "partial"):
+                        stop_reason = native.get("reason", "search_navigation_failed")
+                        verified = False
+                        break
+                page = self.read_messages(window_title, limit=500)
+                if page.get("status") != "ok":
+                    stop_reason = page.get("reason", page["status"])
+                    verified = False
+                    break
+                rows = page["items"]
+                snapshot = page["snapshotId"]
+                coverage = page["coverage"]
+                while page["hasMore"]:
+                    page = self.read_messages(window_title, limit=500, offset=page["nextOffset"], snapshot_id=snapshot)
+                    if page.get("status") != "ok":
+                        break
+                    rows = page["items"] + rows
+                if page.get("status") != "ok":
+                    stop_reason = page.get("reason", page["status"])
+                    verified = False
+                    break
+                if snapshot not in seen_snapshots:
+                    seen_snapshots.add(snapshot)
+                    searched_rows += len(rows)
+                    for index, row in enumerate(rows):
+                        if row.get("text") is None or needle not in (row["text"] if case_sensitive else row["text"].casefold()):
+                            continue
+                        matches.append({**row, "snapshotId": snapshot, "searchVisit": step,
+                                        "contextBefore": rows[max(0, index-context_rows):index],
+                                        "contextAfter": rows[index+1:index+1+context_rows]})
+                if native and not verified:
+                    stop_reason = native.get("reason", "search_result_not_observed")
+                    break
+                if len(matches) >= limit:
+                    stop_reason = "result_limit"
+                    break
+                if native and native.get("searchState", {}).get("previousEnabled") is False:
+                    stop_reason = "navigation_exhausted"
+                    break
+            return {"status": "ok" if verified else "partial", "source": "macos_accessibility",
+                    "windowTitle": window_title, "query": query, "items": matches[:limit],
+                    "total": len(matches), "truncated": len(matches) > limit,
+                    "coverage": {**coverage, "historyComplete": False, "snapshotsVisited": len(seen_snapshots)},
+                    "searchedRows": searched_rows, "historyRequested": bool(load_pages),
+                    "searchScope": "visited_app_search_snapshots" if use_app_search else "currently_exposed_bodies",
+                    "snapshotId": snapshot, "databaseCalls": 0, "appSearchUsed": use_app_search,
+                    "searchVerified": verified if use_app_search else None,
+                    "stopReason": stop_reason, "searchVisits": visits,
+                    "duplicatesPossible": len(seen_snapshots) > 1,
+                    "nativeSearch": visits[0] if visits else None}
 
     def send_message(self, window_title, text, operation_id, wait_seconds=3, require_self=False):
         return AXSendEngine(self).send(window_title, text, operation_id, wait_seconds, require_self)

@@ -32,12 +32,13 @@ python3 SKILL_DIR/scripts/kax.py call kakaotalk_ax_send --args-file /absolute/pa
   일괄 도구가 창 열기와 병렬 읽기를 수행하므로 별도의 제어 코드나 스레드를 작성하지 않는다.
   `close_after=True`이면 그 호출이 새로 연 창만 닫는다. 창만 닫기는 `kakaotalk_ax_close`이며 초안은 보존한다.
 - `items`에는 현재 AX에 노출된 행만 포함된다. `kind=text`의 `text`가 메시지 본문이고,
-  나머지 행은 `unclassified`/`axParts`에 보존한다. 작성자와 생략된 시각은 추측하지 않는다.
+  이미지는 `attachment`/`attachments`로, 나머지 행은 `unclassified`/`axParts`에 보존한다. 작성자와 생략된 시각은 추측하지 않는다.
 - `hasMore=true`면 `nextOffset`/`snapshotId`를 다음 호출의 `offset`/`snapshot_id`로 전달한다.
   `snapshot_changed`면 첫 페이지부터 다시 읽는다. `hasMore=false`라도 전체 과거 기록을 다 읽었다는 뜻은 아니다.
 - 이전 대화는 `kakaotalk_ax_load_more(window_title, pages=1)`로 제한해서 요청한다. 추가 행이 없다는
   결과만으로 전체 과거 기록의 끝이라고 판단하지 않는다. 최대 1000행이며 `coverage`와 실제 AX 결과를 확인한다.
-- `kakaotalk_ax_search(window_title, query)`는 앱 검색을 실행하고 노출된 본문 중 일치한 항목을 반환한다.
+- `kakaotalk_ax_read_attachment`는 최신 `row_index`/`snapshot_id`로 사진 영역을 PNG `imagePath`에 반환한다. 이미지를 직접 확인하고, 텍스트 추출이 필요한 경우에만 `ocr=True`를 쓴다. 원본 파일이 아닌 창 내부 사진 영역 캡처이며 화면 기록 권한이 필요하다.
+- `kakaotalk_ax_search(window_title, query)`는 앱 검색의 이전 결과를 제한된 횟수만큼 순회하며 본문과 주변 행을 반환한다. `searchVerified`/`stopReason`을 확인한다. 겹치는 스냅샷은 같은 메시지를 다시 포함할 수 있다.
   전체 검색 인덱스를 수집했다고 설명하지 않는다. `use_app_search=False`는 노출 본문만 검사한다.
   `kakaotalk_ax_close_search`로 검색 UI를 닫는다.
 - AX 전송은 `kakaotalk_ax_send(window_title, text, operation_id)`다. 요청 ID를 한 번 정해서 보관한다.
@@ -52,6 +53,6 @@ python3 SKILL_DIR/scripts/kax.py call kakaotalk_ax_send --args-file /absolute/pa
 
 `status`는 열린 창의 AX 상태를 확인한다.
 최근 일주일처럼 기간 전체를 요청받아도 AX에 노출된 범위와 읽지 못한 범위를 구분한다.
-사진·첨부·작성자·생략된 시각·전체 기록을 확인했다고 추측하지 않는다.
+이미지는 `read_attachment`로 실제 확인한 범위만 설명한다. 원본 첨부·작성자·생략된 시각·전체 기록을 확인했다고 추측하지 않는다.
 전송 본문은 사용자의 요청을 따른다. 본인 방에 검증을 요청받아 문구를 정해야 한다면
 자연스러운 짧은 문장을 사용하고, 사용자가 원하지 않은 기술 설명이나 표식을 넣지 않는다.

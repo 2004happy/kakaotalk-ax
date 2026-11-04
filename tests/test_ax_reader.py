@@ -63,9 +63,10 @@ class AXReadingTests(unittest.TestCase):
 
     def test_unknown_attachment_rows_are_preserved_and_coverage_is_explicit(self):
         result = self.native.read_messages("Fixture")
-        self.assertEqual(result["items"][-1]["kind"], "unclassified")
+        self.assertEqual(result["items"][-1]["kind"], "attachment")
         self.assertEqual(result["items"][-1]["axParts"][0]["AXDescription"], "사진")
-        self.assertEqual(result["unclassifiedRowCount"], 1)
+        self.assertEqual(result["unclassifiedRowCount"], 0)
+        self.assertEqual(result["attachmentRowCount"], 1)
         self.assertFalse(result["coverage"]["historyComplete"])
         self.assertFalse(result["coverage"]["scrollPerformed"])
         self.native.raw.update(exposedRowCount=1005, rowStart=5, rowsTruncated=True)

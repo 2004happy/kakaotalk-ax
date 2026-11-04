@@ -1,12 +1,16 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import Vision
+import CoreGraphics
+import ScreenCaptureKit
 
-// Read-only bridge for exposed AX transcript rows.
+// AX transcript reads are read-only; explicit attachment capture can scroll and restore.
 // Only an exact, already-open chat window is read. Never traverse its composer contents.
 enum ReadFailure: Error { case blocked(String) }
 let started = ProcessInfo.processInfo.systemUptime
-let deadline = started + 8.0
+var deadline = started + 8.0
+var uiActions = 0
 let maximumRows = 1000
 var nodesVisited = 0
 var textBytes = 0
@@ -166,7 +170,7 @@ func readRow(_ row: AXUIElement, _ index: Int) throws -> [String: Any] {
             if !text.isEmpty { part[name] = text; textBytes += text.utf8.count }
         }
         try checkBudget()
-        if part.count > 1 { parts.append(part) }
+        if part.count > 1 || role == "AXImage" || role == "AXLink" { parts.append(part) }
         // A text area's value already contains its text, including newlines.
         if role == "AXTextArea" { return }
         for child in attributes["AXChildren"] as? [AXUIElement] ?? [] { try walk(child, depth + 1) }
@@ -175,11 +179,151 @@ func readRow(_ row: AXUIElement, _ index: Int) throws -> [String: Any] {
     return ["rowIndex": index, "parts": parts]
 }
 
+func frame(_ el: AXUIElement) throws -> CGRect {
+    guard let position = try attribute(el, "AXPosition"), let size = try attribute(el, "AXSize"),
+          CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else {
+        throw ReadFailure.blocked("attachment_geometry_unavailable")
+    }
+    var point = CGPoint.zero, dimensions = CGSize.zero
+    guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+          AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { throw ReadFailure.blocked("attachment_geometry_unavailable") }
+    return CGRect(origin: point, size: dimensions)
+}
+func imageElements(_ root: AXUIElement) throws -> [AXUIElement] {
+    var seen = IdentitySet(), result: [AXUIElement] = []
+    func walk(_ el: AXUIElement, _ depth: Int) throws {
+        guard seen.insert(el) else { return }
+        nodesVisited += 1
+        try checkBudget()
+        guard depth <= 16 else { throw ReadFailure.blocked("accessibility_tree_depth") }
+        let role = try string(el, "AXRole")
+        if role == "AXImage" { result.append(el); return }
+        if role == "AXTextArea" { return }
+        for child in try elements(el, "AXChildren") { try walk(child, depth + 1) }
+    }
+    try walk(root, 0)
+    return result
+}
+func attachment(_ request: [String: Any], _ window: AXUIElement, _ table: AXUIElement, _ pid: pid_t) throws -> [String: Any] {
+    deadline = started + 18
+    guard let rowIndex = request["rowIndex"] as? Int,
+          let expected = request["expectedParts"] as? [[String: String]],
+          let expectedCount = request["expectedCount"] as? Int else { throw ReadFailure.blocked("invalid_attachment_request") }
+    let listing = try rows(table)
+    let index = rowIndex - listing.start
+    guard listing.count == expectedCount, listing.items.indices.contains(index) else { throw ReadFailure.blocked("attachment_snapshot_changed") }
+    let row = listing.items[index]
+    let actual = try readRow(row, rowIndex)["parts"] as? [[String: String]] ?? []
+    guard actual == expected else { throw ReadFailure.blocked("attachment_snapshot_changed") }
+    guard !actual.contains(where: { $0["role"] == "AXTextArea" && !($0["AXValue"] ?? "").isEmpty }) else {
+        throw ReadFailure.blocked("attachment_requires_image_only_row")
+    }
+    let images = try imageElements(row).filter { el in
+        let rect = try frame(el); return rect.width >= 40 && rect.height >= 40
+    }
+    guard images.count == 1 else { throw ReadFailure.blocked("attachment_image_not_unique") }
+    guard CGPreflightScreenCaptureAccess() else { throw ReadFailure.blocked("screen_recording_permission_required") }
+    guard let parent = try attribute(table, "AXParent") else { throw ReadFailure.blocked("transcript_scroll_unavailable") }
+    let scroll = parent as! AXUIElement
+    guard try string(scroll, "AXRole") == "AXScrollArea" else { throw ReadFailure.blocked("transcript_scroll_unavailable") }
+    let viewport = try frame(scroll)
+    var changedScroll = false
+    var scrollbar: AXUIElement?
+    var originalScroll: NSNumber?
+    var lastScroll: NSNumber?
+    if let bar = try attribute(scroll, "AXVerticalScrollBar") {
+        scrollbar = (bar as! AXUIElement)
+        originalScroll = try attribute(scrollbar!, "AXValue") as? NSNumber
+    }
+    defer {
+        // Do not overwrite a user's concurrent scroll.
+        if changedScroll, let bar = scrollbar, let original = originalScroll, let last = lastScroll,
+           let current = try? attribute(bar, "AXValue") as? NSNumber, abs(current.doubleValue - last.doubleValue) < 0.002 {
+            _ = AXUIElementSetAttributeValue(bar, "AXValue" as CFString, original)
+            uiActions += 1
+        }
+    }
+    for _ in 0..<4 {
+        let imageFrame = try frame(images[0])
+        if viewport.insetBy(dx: 0, dy: 2).contains(imageFrame) { break }
+        guard imageFrame.height < viewport.height - 4, let bar = scrollbar,
+              let current = try attribute(bar, "AXValue") as? NSNumber,
+              let first = listing.items.first, let last = listing.items.last else { throw ReadFailure.blocked("attachment_not_fully_visible") }
+        let contentHeight = try frame(last).maxY - frame(first).minY
+        guard contentHeight > viewport.height else { throw ReadFailure.blocked("attachment_not_fully_visible") }
+        let delta = imageFrame.midY - viewport.midY
+        let value = NSNumber(value: min(1, max(0, current.doubleValue + Double(delta / (contentHeight - viewport.height)))))
+        let result = AXUIElementSetAttributeValue(bar, "AXValue" as CFString, value)
+        uiActions += 1
+        guard result == .success else { throw ReadFailure.blocked("attachment_scroll_failed") }
+        changedScroll = true
+        lastScroll = value
+        Thread.sleep(forTimeInterval: 0.15)
+    }
+    let rect = try frame(images[0])
+    guard viewport.contains(rect) else { throw ReadFailure.blocked("attachment_not_fully_visible") }
+    let title = try string(window, "AXTitle")
+    guard #available(macOS 14.2, *) else { throw ReadFailure.blocked("attachment_capture_requires_macos14_2") }
+    _ = NSApplication.shared
+    let contentWait = DispatchSemaphore(value: 0)
+    var content: SCShareableContent?
+    SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: false) { value, _ in
+        content = value; contentWait.signal()
+    }
+    guard contentWait.wait(timeout: .now() + 3) == .success else { throw ReadFailure.blocked("attachment_capture_timeout") }
+    let candidates = content?.windows.filter { $0.owningApplication?.processID == pid && $0.title == title } ?? []
+    guard candidates.count == 1, let captureWindow = candidates.first else { throw ReadFailure.blocked("attachment_capture_window_not_unique") }
+    let windowRect = captureWindow.frame
+    guard windowRect.contains(rect) else { throw ReadFailure.blocked("attachment_not_fully_visible") }
+    let filter = SCContentFilter(desktopIndependentWindow: captureWindow)
+    let configuration = SCStreamConfiguration()
+    configuration.width = Int(windowRect.width * 2)
+    configuration.height = Int(windowRect.height * 2)
+    configuration.showsCursor = false
+    configuration.scalesToFit = true
+    configuration.ignoreShadowsSingleWindow = true
+    let captureWait = DispatchSemaphore(value: 0)
+    var captured: CGImage?
+    SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) { image, _ in
+        captured = image; captureWait.signal()
+    }
+    guard captureWait.wait(timeout: .now() + 3) == .success, let capture = captured else {
+        throw ReadFailure.blocked("attachment_window_capture_failed")
+    }
+    let scaleX = CGFloat(capture.width) / windowRect.width, scaleY = CGFloat(capture.height) / windowRect.height
+    let cropRect = CGRect(x: (rect.minX - windowRect.minX) * scaleX, y: (rect.minY - windowRect.minY) * scaleY,
+                          width: rect.width * scaleX, height: rect.height * scaleY).integral
+    guard let crop = capture.cropping(to: cropRect) else { throw ReadFailure.blocked("attachment_crop_failed") }
+    guard try frame(images[0]) == rect, try readRow(row, rowIndex)["parts"] as? [[String: String]] == expected,
+          try rows(table).count == expectedCount else { throw ReadFailure.blocked("attachment_changed_during_capture") }
+    var result: [String: Any] = ["status": "ok", "windowTitle": title, "rowIndex": rowIndex,
+        "imageSource": "ax_located_window_crop", "originalImage": false,
+        "width": crop.width, "height": crop.height, "ocrPerformed": false]
+    if request["ocr"] as? Bool == true {
+        let recognize = VNRecognizeTextRequest()
+        recognize.recognitionLevel = .accurate
+        recognize.recognitionLanguages = ["ko-KR", "en-US"]
+        recognize.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: crop).perform([recognize])
+        let lines: [[String: Any]] = (recognize.results ?? []).compactMap { observation in
+            guard let candidate = observation.topCandidates(1).first else { return nil }
+            return ["text": candidate.string, "confidence": candidate.confidence]
+        }
+        result["ocrPerformed"] = true
+        result["ocr"] = ["text": lines.compactMap { $0["text"] as? String }.joined(separator: "\n"),
+                         "lines": lines, "source": "vision_ocr", "mayBeInaccurate": true]
+    }
+    let bitmap = NSBitmapImageRep(cgImage: crop)
+    guard let png = bitmap.representation(using: .png, properties: [:]) else { throw ReadFailure.blocked("attachment_png_failed") }
+    result["imageBase64"] = png.base64EncodedString()
+    return result
+}
+
 func run() throws -> [String: Any] {
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard input.count <= 16_384,
           let request = try JSONSerialization.jsonObject(with: input) as? [String: Any],
-          let action = request["action"] as? String, ["windows", "read"].contains(action) else {
+          let action = request["action"] as? String, ["windows", "read", "attachment"].contains(action) else {
         throw ReadFailure.blocked("invalid_read_request")
     }
     guard AXIsProcessTrusted() else { throw ReadFailure.blocked("accessibility_permission_required") }
@@ -221,6 +365,7 @@ func run() throws -> [String: Any] {
     guard found.composers == 1, found.tables.count == 1 else {
         throw ReadFailure.blocked("chat_transcript_not_unique")
     }
+    if action == "attachment" { return try attachment(request, window, found.tables[0], app.processIdentifier) }
     let before = try rows(found.tables[0])
     var seen = IdentitySet(), result: [[String: Any]] = []
     for (offset, row) in before.items.enumerated() {
@@ -249,7 +394,7 @@ catch { report = ["status": "bridge_error"] }
 report["source"] = "macos_accessibility"
 report["attributeReadMode"] = "batched_metadata"
 report["databaseCalls"] = 0
-report["uiActions"] = 0
+report["uiActions"] = uiActions
 report["optionalAttributeFailures"] = optionalAttributeFailures
 report["dispatchAttempted"] = false
 report["nodesVisited"] = nodesVisited

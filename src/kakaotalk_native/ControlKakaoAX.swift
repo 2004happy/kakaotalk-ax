@@ -171,11 +171,50 @@ func searchField(_ container: AXUIElement, open: Bool) throws -> AXUIElement {
     return found[0]
 }
 
+// Kakao's search toolbar has no accessible labels on its navigation buttons.
+// Resolve the observed sibling layout, fail closed if a future app changes it.
+func searchButtons(_ field: AXUIElement) throws -> [AXUIElement] {
+    guard let parent = attr(field, "AXParent") else { throw ControlFailure.blocked("search_toolbar_unavailable") }
+    let siblings = elements(parent as! AXUIElement)
+    guard let index = siblings.firstIndex(where: { CFEqual($0, field) }) else { throw ControlFailure.blocked("search_field_missing") }
+    let buttons = Array(siblings.dropFirst(index + 1).prefix(5))
+    guard buttons.count == 5, buttons.allSatisfy({ string($0, "AXRole") == "AXButton" }),
+          buttons.map({ string($0, "AXIdentifier") }) == ["_NS:10", "_NS:30", "_NS:43", "_NS:56", "_NS:80"] else {
+        throw ControlFailure.blocked("search_toolbar_layout_unknown")
+    }
+    return buttons
+}
+func searchState(_ target: AXUIElement, _ field: AXUIElement, _ query: String) throws -> [String: Any] {
+    let buttons = try searchButtons(field)
+    let tables = try nodes(target).filter { string($0, "AXRole") == "AXTable" }
+    guard tables.count == 1 else { throw ControlFailure.blocked("chat_transcript_not_unique") }
+    let visible = elements(tables[0], "AXVisibleRows")
+    var rows: [[String: Any]] = []
+    var matches = 0
+    for row in visible {
+        let parts = try nodes(row, tables: true)
+        let bodies = parts.filter { string($0, "AXRole") == "AXTextArea" }.map { string($0, "AXValue") }
+        matches += bodies.filter { $0.range(of: query, options: .caseInsensitive) != nil }.count
+        rows.append(["index": (attr(row, "AXIndex") as? NSNumber)?.intValue ?? -1,
+                     "bodies": bodies,
+                     "labels": parts.filter { string($0, "AXRole") == "AXStaticText" }.map { string($0, "AXValue") }])
+    }
+    guard let previous = attr(buttons[0], "AXEnabled") as? NSNumber,
+          let next = attr(buttons[1], "AXEnabled") as? NSNumber else {
+        throw ControlFailure.blocked("search_navigation_state_unavailable")
+    }
+    return ["query": string(field, "AXValue"), "visibleRows": rows, "visibleMatchCount": matches,
+            "previousEnabled": previous.boolValue, "nextEnabled": next.boolValue]
+}
+func stateKey(_ state: [String: Any]) -> Data {
+    return (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])) ?? Data()
+}
+
 func run() throws -> [String: Any] {
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard input.count <= 16_384, let request = try JSONSerialization.jsonObject(with: input) as? [String: Any],
           let command = request["action"] as? String,
-          ["rooms", "open", "close", "load_older", "search_open", "search_query", "search_close", "search_rooms"].contains(command) else {
+          ["rooms", "open", "close", "load_older", "search_open", "search_query", "search_previous", "search_close", "search_rooms"].contains(command) else {
         throw ControlFailure.blocked("invalid_control_request")
     }
     guard AXIsProcessTrusted() else { throw ControlFailure.blocked("accessibility_permission_required") }
@@ -275,17 +314,42 @@ func run() throws -> [String: Any] {
         }
         throw ControlFailure.blocked("closed_window_not_observed")
     }
-    if ["search_open", "search_query"].contains(command) {
-        let field = try searchField(target, open: true)
-        if command == "search_query" {
-            guard let query = request["query"] as? String, !query.isEmpty, query.utf8.count <= 4096 else { throw ControlFailure.blocked("invalid_query") }
+    if ["search_open", "search_query", "search_previous"].contains(command) {
+        let field = try searchField(target, open: command != "search_previous")
+        if command == "search_open" { return ["status": "ok", "windowTitle": title] }
+        guard let query = request["query"] as? String, !query.isEmpty, query.utf8.count <= 4096 else { throw ControlFailure.blocked("invalid_query") }
+        let before = try searchState(target, field, query)
+        if command == "search_previous" {
+            guard string(field, "AXValue") == query else { throw ControlFailure.blocked("search_query_changed") }
+            if before["previousEnabled"] as? Bool == false {
+                return ["status": "ok", "searchVerified": true, "searchOutcome": "navigation_exhausted", "searchState": before]
+            }
+            try act(try searchButtons(field)[0], "AXPress")
+        } else {
             try setValue(field, query)
-            if names(field).contains("AXConfirm") { try act(field, "AXConfirm") }
-            Thread.sleep(forTimeInterval: 0.65)
+            guard names(field).contains("AXConfirm") else { throw ControlFailure.blocked("search_confirm_unavailable") }
+            try act(field, "AXConfirm")
         }
-        return ["status": "ok", "windowTitle": title, "query": string(field, "AXValue"),
-                "settableAttributes": ["AXValue", "AXFocused", "AXSelectedText", "AXSelectedTextRange"].filter { settable(field, $0) },
-                "fieldActions": names(field), "tableCount": try nodes(target).filter { string($0, "AXRole") == "AXTable" }.count]
+        let verificationStarted = ProcessInfo.processInfo.systemUptime
+        let until = min(deadline - 0.2, verificationStarted + 3.0)
+        var last = Data(), stableSamples = 0
+        var observed = before
+        while ProcessInfo.processInfo.systemUptime < until {
+            Thread.sleep(forTimeInterval: 0.15)
+            observed = try searchState(target, field, query)
+            let key = stateKey(observed)
+            stableSamples = key == last ? stableSamples + 1 : 0
+            last = key
+            let moved = command != "search_previous" || key != stateKey(before)
+            if ProcessInfo.processInfo.systemUptime - verificationStarted >= 0.65,
+               stableSamples >= 1, moved, observed["query"] as? String == query,
+               (observed["visibleMatchCount"] as? Int ?? 0) > 0 {
+                return ["status": "ok", "windowTitle": title, "query": query,
+                        "searchVerified": true, "searchOutcome": "visible_match_observed", "searchState": observed]
+            }
+        }
+        return ["status": "partial", "reason": "search_result_not_observed", "windowTitle": title,
+                "query": query, "searchVerified": false, "searchOutcome": "unverified", "searchState": observed]
     }
     let tables = controls.filter { string($0, "AXRole") == "AXTable" }
     guard tables.count == 1 else { throw ControlFailure.blocked("chat_transcript_not_unique") }

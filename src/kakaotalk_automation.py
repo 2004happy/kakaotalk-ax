@@ -1,6 +1,7 @@
 """Native macOS Accessibility operations for KakaoTalk via CLI and MCP."""
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ from contextlib import nullcontext
 from importlib.resources import files
 from pathlib import Path
 
-from kakaotalk_ax import AXOperations, integer, ui_session
+from kakaotalk_ax import AXOperations, integer, ui_session, title, boolean
 from kakaotalk_state import digest
 
 
@@ -108,9 +109,7 @@ class NativeAX(AXOperations):
         raw = self.call("read", [window_title])
         if raw.get("status") != "ok":
             return raw
-        snapshot = digest(json.dumps({k: raw[k] for k in (
-            "windowTitle", "processId", "rows", "exposedRowCount", "rowStart", "rowsTruncated")},
-            ensure_ascii=False, sort_keys=True))[:24]
+        snapshot = snapshot_digest(raw)
         if snapshot_id and snapshot_id != snapshot:
             return {"status": "snapshot_changed", "source": "macos_accessibility",
                     "reason": "AX rows changed; restart at offset 0", "items": [],
@@ -124,6 +123,7 @@ class NativeAX(AXOperations):
             "hasMore": start > 0, "nextOffset": offset + end - start if start > 0 else None,
             "snapshotId": snapshot, "textMessageCount": sum(item["kind"] == "text" for item in items),
             "unclassifiedRowCount": sum(item["kind"] == "unclassified" for item in items),
+            "attachmentRowCount": sum(item["kind"] == "attachment" for item in items),
             "coverage": {"scope": "currently_exposed_ax_rows", "historyComplete": False,
                          "consistency": "best_effort", "exposedRowCount": raw["exposedRowCount"],
                          "rowsTruncated": raw["rowsTruncated"], "rowStart": raw["rowStart"],
@@ -132,6 +132,60 @@ class NativeAX(AXOperations):
                          "optionalAttributeFailures": raw.get("optionalAttributeFailures", {})},
             "databaseCalls": 0, "uiActions": 0, "elapsedMs": raw["elapsedMs"],
         }
+
+    def read_attachment(self, window_title, row_index, snapshot_id, output_path=None, ocr=False):
+        """Return one AX image row as a PNG crop; scrolls via AX and restores it.
+
+        macOS 14.2+ and Screen Recording permission are required. The original file is
+        not fetched. OCR is optional and kept separate from message text.
+        """
+        title(window_title)
+        integer(row_index, "row_index", 0, 1_000_000)
+        boolean(ocr, "ocr")
+        if not isinstance(snapshot_id, str) or not re.fullmatch(r"[0-9a-f]{24}", snapshot_id):
+            raise ValueError("A current read_messages snapshot_id is required")
+        if output_path is not None and (not isinstance(output_path, str) or not Path(output_path).is_absolute()):
+            raise ValueError("output_path must be an absolute path")
+        if output_path and Path(output_path).exists():
+            raise ValueError("output_path already exists")
+        with ui_session():
+            raw = self.call("read", [window_title])
+            if raw.get("status") != "ok":
+                return raw
+            if snapshot_digest(raw) != snapshot_id:
+                return {"status": "snapshot_changed", "reason": "Read the attachment row again", "databaseCalls": 0}
+            selected = [row for row in raw["rows"] if row["rowIndex"] == row_index]
+            if len(selected) != 1 or ax_row(selected[0])["kind"] != "attachment":
+                return {"status": "blocked", "reason": "attachment_row_required", "databaseCalls": 0}
+            request = {"action": "attachment", "windowTitles": [window_title], "rowIndex": row_index,
+                       "expectedParts": selected[0]["parts"], "expectedCount": raw["exposedRowCount"],
+                       "ocr": ocr}
+            result = subprocess.run([str(self.build("read"))], input=json.dumps(request, ensure_ascii=False),
+                                    capture_output=True, text=True, timeout=25)
+            if result.returncode:
+                raise RuntimeError("Native attachment reader failed")
+            value = json.loads(result.stdout)
+            encoded = value.pop("imageBase64", None)
+            if value.get("status") == "ok":
+                if not encoded:
+                    raise RuntimeError("Attachment reader returned no image")
+                image = base64.b64decode(encoded, validate=True)
+                if output_path:
+                    descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                else:
+                    # A private temporary image can be viewed directly by the caller.
+                    descriptor, output_path = tempfile.mkstemp(prefix="kax-attachment-", suffix=".png")
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(image)
+                value["imagePath"] = str(Path(output_path))
+            value["snapshotId"] = snapshot_id
+            return value
+
+
+def snapshot_digest(raw):
+    return digest(json.dumps({k: raw[k] for k in (
+        "windowTitle", "processId", "rows", "exposedRowCount", "rowStart", "rowsTruncated")},
+        ensure_ascii=False, sort_keys=True))[:24]
 
 
 def ax_row(row):
@@ -144,7 +198,14 @@ def ax_row(row):
                           line.strip(), flags=re.IGNORECASE)]
     dates = [part["AXHelp"] for part, _ in times if
              re.fullmatch(r"\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.?", part.get("AXHelp", ""))]
-    return {"rowIndex": row["rowIndex"], "kind": "text" if bodies else "unclassified",
+    attachments = [{"type": "image", "textSource": "accessibility_metadata",
+                    "description": part.get("AXDescription") or None,
+                    "title": part.get("AXTitle") or None}
+                   for part in parts if part["role"] == "AXImage"] if not bodies else []
+    links = [part.get("AXURL") or part.get("AXValue") or part.get("AXTitle")
+             for part in parts if part["role"] == "AXLink"]
+    return {"rowIndex": row["rowIndex"], "kind": "text" if bodies else "attachment" if attachments else "unclassified",
+            "attachments": attachments, "links": [link for link in links if link],
             "text": "\n".join(bodies) if bodies else None, "sender": None,
             "timeText": times[0][1] if len(times) == 1 else None,
             "dateText": dates[0] if len(set(dates)) == 1 else None, "axParts": parts}
@@ -158,7 +219,7 @@ def main():
     command.add_argument("--kind", choices=("send", "read", "control"), default="send")
     command = commands.add_parser("ax-call")
     command.add_argument("method", choices=("windows", "rooms", "search_rooms", "open_room", "close_room",
-                        "read_messages", "read_many", "load_more", "search_messages", "close_search",
+                        "read_messages", "read_attachment", "read_many", "load_more", "search_messages", "close_search",
                         "send_message", "send_result"))
     command.add_argument("--args-file", type=Path)
     commands.add_parser("ax-windows")

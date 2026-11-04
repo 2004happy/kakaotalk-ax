@@ -18,7 +18,7 @@ SEND_TOOL = "kakaotalk_ax_send"
 SEND_TOOLS = frozenset({SEND_TOOL})
 UI_TOOLS = frozenset({"kakaotalk_ax_rooms", "kakaotalk_ax_search_rooms", "kakaotalk_ax_open",
                       "kakaotalk_ax_close", "kakaotalk_ax_read_many", "kakaotalk_ax_load_more",
-                      "kakaotalk_ax_search", "kakaotalk_ax_close_search"})
+                      "kakaotalk_ax_search", "kakaotalk_ax_close_search", "kakaotalk_ax_read_attachment"})
 
 
 def checked_arguments(name, arguments):
@@ -31,7 +31,11 @@ def checked_arguments(name, arguments):
 
 def render_result(result):
     texts = []
+    has_image = False
     for part in result.content:
+        if part.type == "image":
+            has_image = True
+            continue
         if part.type != "text":
             raise ValueError("Unsupported non-text AX result")
         try:
@@ -39,6 +43,8 @@ def render_result(result):
         except ValueError:
             texts.append(part.text)
     value = texts[0] if len(texts) == 1 else {"content": texts}
+    if has_image and (not isinstance(value, dict) or not value.get("imagePath")):
+        raise ValueError("Image result has no local imagePath")
     if result.isError:
         return {"status": "mcp_error", "detail": value}
     return value
